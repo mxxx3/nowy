@@ -8,8 +8,8 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 
 # --- KONFIGURACJA KLUCZY ---
 # Możesz wpisać je tutaj bezpośrednio w cudzysłowie:
-GEMINI_KEY = os.environ.get("AIzaSyAznQEeX_BmFEHAmFAwvOtw50tqhIcFb8I") or 'TWÓJ_KLUCZ_GEMINI'
-TG_TOKEN = os.environ.get("8254563937:AAF4C2z0npXhN1mIp4E0xBi8Ug9n4pdZz-0") or 'TWÓJ_TOKEN_TELEGRAM'
+GEMINI_KEY = os.environ.get("AIzaSyAznQEeX_BmFEHAmFAwvOtw50tqhIcFb8I")
+TG_TOKEN = os.environ.get("8254563937:AAF4C2z0npXhN1mIp4E0xBi8Ug9n4pdZz-0")
 
 # Konfiguracja modelu Gemini
 genai.configure(api_key=GEMINI_KEY)
@@ -50,4 +50,5 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
     # 3. Zacznij nasłuchiwanie wiadomości
+
     application.run_polling()
