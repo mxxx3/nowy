@@ -12,7 +12,8 @@ from telegram.ext import (
     filters,
 )
 
-# --- POPRAWKA DLA WINDOWS ---
+# --- POPRAWKA DLA WINDOWS (Błąd strefy czasowej) ---
+# Zapobiega wywalaniu się bota na komputerach z Windowsem
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -28,8 +29,8 @@ telegram.ext.JobQueue = DummyJobQueue
 GEMINI_KEY = "AIzaSyDiiKs5Y-6CBuTLpSwhc_pQJP5rWb_S4F8"
 TG_TOKEN = "8254563937:AAF4C2z0npXhN1mIp4E0xBi8Ug9n4pdZz-0"
 
-# IDENTYFIKATOR TWOJEJ GRUPY
-ALLOWED_GROUP_ID = -1003676480681
+# LISTA DOZWOLONYCH GRUP
+ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
 # =========================
 # INICJALIZACJA AI
@@ -37,7 +38,7 @@ ALLOWED_GROUP_ID = -1003676480681
 genai.configure(api_key=GEMINI_KEY)
 
 def get_best_model():
-    """Automatyczny wybór najlepszego dostępnego modelu."""
+    """Wybiera najlepszy dostępny model dla Twojego klucza API."""
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         priority_list = ["2.5-flash", "2.0-flash", "1.5-flash", "flash-latest", "gemini-pro"]
@@ -52,80 +53,91 @@ def get_best_model():
 model = get_best_model()
 
 # =========================
-# SERWER WWW (Koyeb)
+# SERWER WWW (Dla Koyeb)
 # =========================
 app = Flask(__name__)
+
 @app.route("/")
-def home(): return "Bot is running!", 200
+def home():
+    return "Bot is running!", 200
 
 def run_flask():
-    try: app.run(host="0.0.0.0", port=8080)
-    except: pass
+    try:
+        # Port 8080 jest wymagany przez Koyeb
+        app.run(host="0.0.0.0", port=8080)
+    except Exception:
+        pass
 
 # =========================
 # OBSŁUGA WIADOMOŚCI
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Sprawdzamy czy to wiadomość tekstowa
     if not update.message or not update.message.text:
         return
 
-    # 2. Blokada na konkretną grupę
-    # Sprawdzamy, czy ID czatu zgadza się z Twoją grupą
-    if update.effective_chat.id != ALLOWED_GROUP_ID:
-        # Opcjonalnie: można tu wysłać info, że bot tu nie działa, 
-        # ale lepiej milczeć, żeby nie spamować innych grup.
+    # 1. SPRAWDZENIE GRUPY
+    if update.effective_chat.id not in ALLOWED_GROUPS:
         return
 
     user_text = update.message.text
 
-    # 3. Sprawdzamy czy wiadomość zaczyna się od /gpt
+    # 2. SPRAWDZENIE KOMENDY /gpt
     if not user_text.lower().startswith('/gpt'):
         return
 
-    # Usuwamy "/gpt" z początku zapytania
-    # Usuwamy też ewentualne "/gpt@nazwa_bota"
+    # Wyciąganie treści zapytania (usuwamy /gpt)
     prompt = user_text.replace('/gpt', '', 1).strip()
+    
+    # Obsługa /gpt@nazwa_bota
     if prompt.startswith(f"@{context.bot.username}"):
         prompt = prompt.replace(f"@{context.bot.username}", "", 1).strip()
 
-    # Jeśli ktoś wpisał samo /gpt bez pytania
     if not prompt:
-        await update.message.reply_text("Wpisz pytanie po komendzie /gpt, np.: /gpt Jak działa AI?")
+        await update.message.reply_text("Wpisz pytanie po /gpt, np: /gpt Jak działa słońce?")
         return
 
     try:
-        # Generowanie odpowiedzi
+        # Generowanie odpowiedzi przez Gemini
         response = model.generate_content(prompt)
         if response and response.text:
+            # Bot odpowie dokładnie tam, gdzie padło pytanie
             await update.message.reply_text(response.text)
-    except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg:
-            await update.message.reply_text("Zbyt wiele zapytań! Poczekaj chwilę.")
         else:
-            print(f"Błąd: {e}")
+            await update.message.reply_text("AI nie zwróciło odpowiedzi (możliwa blokada treści).")
+
+    except Exception as e:
+        print(f"Błąd Gemini: {e}")
+        if "429" in str(e):
+            await update.message.reply_text("Zbyt wiele pytań naraz! Poczekaj chwilę.")
+        else:
             await update.message.reply_text("Wystąpił błąd podczas generowania odpowiedzi.")
 
 # =========================
 # START BOTA
 # =========================
 async def start_bot():
-    Thread(target=run_flask, daemon=True).start()
-    print(f"Uruchamiam bota (Tylko dla grupy: {ALLOWED_GROUP_ID})...")
-    
+    # Uruchomienie serwera WWW w tle
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    print(f"Uruchamiam bota dla grup: {ALLOWED_GROUPS}...")
     application = ApplicationBuilder().token(TG_TOKEN).build()
     
-    # Obsługujemy wszystkie wiadomości, ale filtracja dzieje się w handle_message
+    # Reagujemy na wszystkie teksty, filtracja jest w handle_message
     application.add_handler(MessageHandler(filters.TEXT, handle_message))
 
     async with application:
         await application.initialize()
         await application.start()
         await application.updater.start_polling()
-        while True: await asyncio.sleep(3600)
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    if os.name == 'nt': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    try: asyncio.run(start_bot())
-    except KeyboardInterrupt: pass
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        pass
