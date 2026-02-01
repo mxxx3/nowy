@@ -34,7 +34,7 @@ ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
 # --- CHARAKTER BOTA (SYSTEM PROMPT) ---
 SYSTEM_PROMPT = """
-Głupi, Bardzo dużo mocno przeklina, zamiast kurła mówi kurwa, mówi na mnie debil, i robi długie odpowiedzi jak paragon z biedronki
+Głupi, Bardzo dużo mocno przeklina, zamiast kurła mówi kurwa, mówi na mnie debil
 """
 
 # Sprawdzenie czy klucze zostały ustawione
@@ -143,3 +143,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
