@@ -13,7 +13,6 @@ from telegram.ext import (
 )
 
 # --- POPRAWKA DLA WINDOWS (Błąd strefy czasowej) ---
-# Zapobiega wywalaniu się bota na komputerach z Windowsem
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -32,23 +31,41 @@ TG_TOKEN = "8254563937:AAF4C2z0npXhN1mIp4E0xBi8Ug9n4pdZz-0"
 # LISTA DOZWOLONYCH GRUP
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
+# --- CHARAKTER BOTA (SYSTEM PROMPT) ---
+# Tutaj wpisz instrukcje dotyczące osobowości bota
+SYSTEM_PROMPT = """
+Głupi, Bardzo dużo mocno przeklina, zamiast kurła mówi kurwa, mówi na mnie debil, i robi długie odpowiedzi jak paragon z biedronki
+"""
+
 # =========================
 # INICJALIZACJA AI
 # =========================
 genai.configure(api_key=GEMINI_KEY)
 
 def get_best_model():
-    """Wybiera najlepszy dostępny model dla Twojego klucza API."""
+    """Wybiera najlepszy dostępny model i ustawia mu charakter (System Instruction)."""
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         priority_list = ["2.5-flash", "2.0-flash", "1.5-flash", "flash-latest", "gemini-pro"]
+        
+        selected_model_name = "models/gemini-1.5-flash"
         for priority in priority_list:
             for model_name in available_models:
                 if priority in model_name.lower():
-                    return genai.GenerativeModel(model_name)
-        return genai.GenerativeModel(available_models[0])
-    except Exception:
-        return genai.GenerativeModel("models/gemini-1.5-flash")
+                    selected_model_name = model_name
+                    break
+            else: continue
+            break
+        
+        print(f"Inicjalizacja modelu: {selected_model_name} z charakterem.")
+        # Przekazujemy charakter (system_instruction) podczas tworzenia modelu
+        return genai.GenerativeModel(
+            model_name=selected_model_name,
+            system_instruction=SYSTEM_PROMPT
+        )
+    except Exception as e:
+        print(f"Błąd inicjalizacji modelu: {e}")
+        return genai.GenerativeModel("models/gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
 
 model = get_best_model()
 
@@ -63,7 +80,6 @@ def home():
 
 def run_flask():
     try:
-        # Port 8080 jest wymagany przez Koyeb
         app.run(host="0.0.0.0", port=8080)
     except Exception:
         pass
@@ -100,7 +116,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Generowanie odpowiedzi przez Gemini
         response = model.generate_content(prompt)
         if response and response.text:
-            # Bot odpowie dokładnie tam, gdzie padło pytanie
             await update.message.reply_text(response.text)
         else:
             await update.message.reply_text("AI nie zwróciło odpowiedzi (możliwa blokada treści).")
@@ -116,7 +131,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # START BOTA
 # =========================
 async def start_bot():
-    # Uruchomienie serwera WWW w tle
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
@@ -124,7 +138,6 @@ async def start_bot():
     print(f"Uruchamiam bota dla grup: {ALLOWED_GROUPS}...")
     application = ApplicationBuilder().token(TG_TOKEN).build()
     
-    # Reagujemy na wszystkie teksty, filtracja jest w handle_message
     application.add_handler(MessageHandler(filters.TEXT, handle_message))
 
     async with application:
