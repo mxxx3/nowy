@@ -25,7 +25,7 @@ telegram.ext.JobQueue = DummyJobQueue
 # =========================
 # KONFIGURACJA
 # =========================
-GEMINI_KEY = "AIzaSyDiiKs5Y-6CBuTLpSwhc_pQJP5rWb_S4F8"
+GEMINI_KEY = "AIzaSyC3Nmwqau4Hr3yx6OnRj5rpStKYPk6TZnU"
 TG_TOKEN = "8254563937:AAF4C2z0npXhN1mIp4E0xBi8Ug9n4pdZz-0"
 
 # LISTA DOZWOLONYCH GRUP
@@ -140,3 +140,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
