@@ -23,10 +23,11 @@ class DummyJobQueue:
 telegram.ext.JobQueue = DummyJobQueue
 
 # =========================
-# KONFIGURACJA
+# KONFIGURACJA (Zmienne środowiskowe)
 # =========================
-GEMINI_KEY = "AIzaSyC3Nmwqau4Hr3yx6OnRj5rpStKYPk6TZnU"
-TG_TOKEN = "8254563937:AAF4C2z0npXhN1mIp4E0xBi8Ug9n4pdZz-0"
+# Odczytujemy klucze z Koyeb (Environment Variables)
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # LISTA DOZWOLONYCH GRUP
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
@@ -35,6 +36,11 @@ ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 SYSTEM_PROMPT = """
 Głupi, Bardzo dużo mocno przeklina, zamiast kurła mówi kurwa, mówi na mnie debil, i robi długie odpowiedzi jak paragon z biedronki
 """
+
+# Sprawdzenie czy klucze zostały ustawione
+if not GEMINI_KEY or not TG_TOKEN:
+    print("BŁĄD: Brak zmiennych środowiskowych GEMINI_API_KEY lub TELEGRAM_TOKEN!")
+    sys.exit(1)
 
 # =========================
 # INICJALIZACJA AI
@@ -130,14 +136,10 @@ def main():
 
     print(f"Uruchamiam bota dla grup: {ALLOWED_GROUPS}")
     
-    # Standardowe podejście do Application (bez JobQueue dla Windowsa)
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
-    
     application.add_handler(MessageHandler(filters.TEXT, handle_message))
 
-    # run_polling() samo obsługuje pętlę asyncio i czyszczenie przy zamknięciu
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
