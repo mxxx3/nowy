@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sys
+import io
 from threading import Thread
 from flask import Flask
 import google.generativeai as genai
@@ -23,9 +24,8 @@ class DummyJobQueue:
 telegram.ext.JobQueue = DummyJobQueue
 
 # =========================
-# KONFIGURACJA (Zmienne środowiskowe)
+# KONFIGURACJA
 # =========================
-# Odczytujemy klucze z Koyeb (Environment Variables)
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
@@ -36,12 +36,12 @@ ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 SYSTEM_PROMPT = """
 Jesteś wyluzowanym asystentem na grupie Telegram. 
 Masz specyficzny, nieco szorstki styl bycia – możesz czasem przekląć (używaj 'kurwa' zamiast 'kurła'), 
-ale nie obrażaj użytkownika i nie nazywaj go debilem.
+ale nie obrażaj użytkownika i nie nazywaj go debilem
 """
 
-# Sprawdzenie czy klucze zostały ustawione
+# Sprawdzenie kluczy
 if not GEMINI_KEY or not TG_TOKEN:
-    print("BŁĄD: Brak zmiennych środowiskowych GEMINI_API_KEY lub TELEGRAM_TOKEN!")
+    print("BŁĄD: Brakuje zmiennych środowiskowych w Koyeb!")
     sys.exit(1)
 
 # =========================
@@ -50,10 +50,11 @@ if not GEMINI_KEY or not TG_TOKEN:
 genai.configure(api_key=GEMINI_KEY)
 
 def get_best_model():
-    """Automatycznie wybiera najlepszy dostępny model."""
+    """Wybiera najlepszy dostępny model z obsługą wizji."""
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority_list = ["2.5-flash", "2.0-flash", "1.5-flash", "flash-latest", "gemini-pro"]
+        # Gemini 1.5 i 2.x Flash obsługują multimodalność (obraz + tekst)
+        priority_list = ["2.5-flash", "2.0-flash", "1.5-flash", "flash-latest"]
         
         selected_model_name = "models/gemini-1.5-flash"
         for priority in priority_list:
@@ -64,13 +65,12 @@ def get_best_model():
             else: continue
             break
         
-        print(f"Inicjalizacja modelu: {selected_model_name} z Twoim charakterem.")
+        print(f"Inicjalizacja modelu wizyjnego: {selected_model_name}")
         return genai.GenerativeModel(
             model_name=selected_model_name,
             system_instruction=SYSTEM_PROMPT
         )
-    except Exception as e:
-        print(f"Błąd podczas wyboru modelu: {e}")
+    except Exception:
         return genai.GenerativeModel("models/gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
 
 model = get_best_model()
@@ -79,71 +79,86 @@ model = get_best_model()
 # SERWER WWW (Dla Koyeb)
 # =========================
 app = Flask(__name__)
-
 @app.route("/")
-def home():
-    return "Bot is running!", 200
+def home(): return "Bot is running!", 200
 
 def run_flask():
-    try:
-        app.run(host="0.0.0.0", port=8080)
-    except Exception:
-        pass
+    try: app.run(host="0.0.0.0", port=8080)
+    except: pass
 
 # =========================
-# OBSŁUGA WIADOMOŚCI
+# OBSŁUGA WIADOMOŚCI (Tekst i Foto)
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
+    msg = update.message
+    if not msg: return
 
+    # 1. SPRAWDZENIE GRUPY
     if update.effective_chat.id not in ALLOWED_GROUPS:
         return
 
-    user_text = update.message.text
+    # Pobieramy tekst z wiadomości lub podpisu zdjęcia
+    text = msg.text or msg.caption or ""
 
-    if not user_text.lower().startswith('/gpt'):
+    # 2. SPRAWDZENIE KOMENDY /gpt
+    if not text.lower().startswith('/gpt'):
         return
 
-    prompt = user_text.replace('/gpt', '', 1).strip()
-    
+    # Przygotowanie zapytania (usuwamy /gpt)
+    prompt = text.replace('/gpt', '', 1).strip()
     if prompt.startswith(f"@{context.bot.username}"):
         prompt = prompt.replace(f"@{context.bot.username}", "", 1).strip()
 
-    if not prompt:
-        await update.message.reply_text("Wpisz pytanie po /gpt, debilu!")
-        return
-
     try:
-        response = model.generate_content(prompt)
+        content_to_send = [prompt if prompt else "Opisz co widzisz na tym obrazku."]
+        
+        # 3. OBSŁUGA ZDJĘCIA
+        if msg.photo:
+            # Informacja o przetwarzaniu (opcjonalnie)
+            status_msg = await msg.reply_text("Czekaj kurwa, patrzę na to zdjęcie...")
+            
+            # Pobieramy największy rozmiar zdjęcia
+            photo_file = await msg.photo[-1].get_file()
+            img_bytearray = await photo_file.download_as_bytearray()
+            
+            # Dodajemy obraz do zapytania Gemini
+            image_part = {
+                "mime_type": "image/jpeg",
+                "data": bytes(img_bytearray)
+            }
+            content_to_send.append(image_part)
+            
+            # Usuwamy status "Czekaj"
+            await status_msg.delete()
+
+        # Generowanie odpowiedzi
+        response = model.generate_content(content_to_send)
+        
         if response and response.text:
-            await update.message.reply_text(response.text)
+            await msg.reply_text(response.text)
         else:
-            await update.message.reply_text("AI nic nie wypluło, pewnie coś znowu zepsułeś.")
+            await msg.reply_text("Dostałem obrazek, ale AI nic nie wypluło. Może zbyt ostry kontent?")
+
     except Exception as e:
         print(f"Błąd Gemini: {e}")
         if "429" in str(e):
-            await update.message.reply_text("Czekaj kurwa, za dużo pytań naraz!")
+            await msg.reply_text("Zwolnij kurwa! Za dużo obrazków/pytań.")
         else:
-            await update.message.reply_text("Coś się zjebało w Gemini, spróbuj później.")
+            await msg.reply_text("Coś się zjebało przy analizie. Spróbuj później.")
 
 # =========================
-# URUCHOMIENIE BOTA
+# START BOTA
 # =========================
 def main():
-    # Start serwera Flask w osobnym wątku
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    print(f"Uruchamiam bota dla grup: {ALLOWED_GROUPS}")
+    Thread(target=run_flask, daemon=True).start()
+    print(f"Uruchamiam bota z WIZJĄ dla grup: {ALLOWED_GROUPS}")
     
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
-    application.add_handler(MessageHandler(filters.TEXT, handle_message))
+    
+    # MessageHandler teraz reaguje na tekst ORAZ zdjęcia
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
 
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
-
