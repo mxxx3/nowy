@@ -27,21 +27,24 @@ telegram.ext.JobQueue = DummyJobQueue
 # =========================
 # KONFIGURACJA
 # =========================
-API_KEY = os.environ.get("GEMINI_API_KEY") # Upewnij się, że ta zmienna jest w Koyeb
+API_KEY = os.environ.get("GEMINI_API_KEY") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
-# Wczytywanie bazy wiedzy
+# Wczytywanie bazy wiedzy gry
 KNOWLEDGE_LINES = []
 if os.path.exists("knowledge.txt"):
-    with open("knowledge.txt", "r", encoding="utf-8") as f:
-        KNOWLEDGE_LINES = [l.strip() for l in f.readlines() if l.strip()]
-    print(f"Załadowano {len(KNOWLEDGE_LINES)} linii wiedzy.")
+    try:
+        with open("knowledge.txt", "r", encoding="utf-8") as f:
+            KNOWLEDGE_LINES = [l.strip() for l in f.readlines() if l.strip()]
+        print(f"Załadowano {len(KNOWLEDGE_LINES)} linii wiedzy z pliku.")
+    except Exception as e:
+        print(f"Błąd wczytywania pliku: {e}")
 
-def get_context(query, max_chars=12000):
+def get_game_context(query, max_chars=12000):
     if not query: return ""
     keywords = re.findall(r'\b\w{4,}\b', query.lower())
-    if not keywords: return "\n".join(KNOWLEDGE_LINES[-60:])
+    if not keywords: return "\n".join(KNOWLEDGE_LINES[-50:])
     matches = []
     current_len = 0
     for line in reversed(KNOWLEDGE_LINES):
@@ -55,7 +58,7 @@ def get_context(query, max_chars=12000):
 # FUNKCJE API Z BACKOFFEM
 # =========================
 async def api_request(url, payload):
-    for i in range(5): # 5 prób (1s, 2s, 4s, 8s, 16s)
+    for i in range(5):
         try:
             res = requests.post(url, json=payload, timeout=60)
             if res.status_code == 200:
@@ -71,23 +74,27 @@ async def api_request(url, payload):
     return None
 
 # =========================
-# HANDLER /GPT (CZAT + WIZJA)
+# HANDLER /GPT (CZAT + WIEDZA OGÓLNA + WIZJA)
 # =========================
 async def handle_gpt(update: Update, text: str, image_b64: str = None):
     query = text.replace('/gpt', '', 1).strip()
-    context_data = get_context(query)
+    game_context = get_game_context(query)
     
     sys_instruction = (
         "Jesteś wyluzowanym asystentem na grupie Telegram. Masz szorstki styl, "
-        "możesz rzucić kurwą, ale NIE obrażaj użytkownika i NIE nazywaj go debilem. "
-        "Odpowiadaj krótko i wyłącznie po polsku."
-        "powiedz szczerze, że nie wiesz. Nie zmyślaj.\n\n"
-        f"OTO LOGI GRY:\n{context_data}"
+        "możesz przekląć (używaj 'kurwa'), ale NIE obrażaj użytkownika i NIE nazywaj go debilem. "
+        "Odpowiadaj krótko, zwięźle i wyłącznie po polsku.\n\n"
+        "MASZ DWIE MOŻLIWOŚCI ODPOWIEDZI:\n"
+        "1. Korzystaj ze swojej ogólnej wiedzy jako model AI (odpowiadaj na pytania o świecie, nauce, życiu).\n"
+        "2. Jeśli pytanie dotyczy konkretnie gry lub wydarzeń na grupie, korzystaj z poniższych logów.\n\n"
+        f"LOGI GRY DLA KONTEKSTU:\n{game_context}\n\n"
+        "ZASADA: Jeśli czegoś naprawdę nie wiesz (ani z logów, ani z wiedzy ogólnej), powiedz 'Nie wiem'. "
+        "Nigdy nie zmyślaj faktów."
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
     
-    parts = [{"text": query if query else "Analizuj."}]
+    parts = [{"text": query if query else "Co tam?"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -98,21 +105,24 @@ async def handle_gpt(update: Update, text: str, image_b64: str = None):
 
     result = await api_request(url, payload)
     if result:
-        answer = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', "Kurwa, AI milczy.")
-        await update.message.reply_text(answer)
+        try:
+            answer = result['candidates'][0]['content']['parts'][0]['text']
+            await update.message.reply_text(answer)
+        except (KeyError, IndexError):
+            await update.message.reply_text("Kurwa, AI coś zacięło i nie wypluło tekstu.")
     else:
-        await update.message.reply_text("Coś się zjebało z połączeniem do czatu.")
+        await update.message.reply_text("Nie udało się połączyć z mózgiem AI.")
 
 # =========================
-# HANDLER /IMG (TWORZENIE)
+# HANDLER /IMG (GENERATOR IMAGEN 4.0)
 # =========================
 async def handle_img(update: Update, text: str):
     prompt = text.replace('/img', '', 1).strip()
     if not prompt:
-        await update.message.reply_text("Napisz co mam narysować po /img.")
+        await update.message.reply_text("Napisz co mam narysować, kurwa.")
         return
 
-    msg = await update.message.reply_text("Rzeźbię to, czekaj chwilę...")
+    msg = await update.message.reply_text("Rysuję, daj mi chwilę...")
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key={API_KEY}"
     payload = {
@@ -122,17 +132,19 @@ async def handle_img(update: Update, text: str):
 
     result = await api_request(url, payload)
     if result and 'predictions' in result:
-        img_data = result['predictions'][0].get('bytesBase64Encoded')
-        if img_data:
-            img_bytes = base64.b64decode(img_data)
-            await update.message.reply_photo(photo=io.BytesIO(img_bytes))
-            await msg.delete()
-            return
+        try:
+            img_data = result['predictions'][0].get('bytesBase64Encoded')
+            if img_data:
+                img_bytes = base64.b64decode(img_data)
+                await update.message.reply_photo(photo=io.BytesIO(img_bytes))
+                await msg.delete()
+                return
+        except: pass
 
-    await msg.edit_text("Kurwa, nie udało się wygenerować obrazka. Może prompt był zbyt ostry?")
+    await msg.edit_text("Kurwa, Imagen nie chciał tego narysować. Spróbuj zmienić opis.")
 
 # =========================
-# GŁÓWNA LOGIKA TELEGRAMA
+# GŁÓWNA LOGIKA
 # =========================
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -140,7 +152,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text or msg.caption or ""
     
-    # Obsługa obrazka wysłanego do bota
     image_b64 = None
     if msg.photo:
         photo_file = await msg.photo[-1].get_file()
@@ -155,13 +166,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot GPT/IMG is alive!", 200
+def home(): return "All-in-One Bot is Live!", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot gotowy. /gpt do czatu, /img do rysowania.")
+    print("Bot gotowy do akcji.")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
