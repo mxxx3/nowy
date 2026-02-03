@@ -1,6 +1,5 @@
 import os
 import asyncio
-import sys
 import re
 from threading import Thread
 from flask import Flask
@@ -13,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 
-# --- POPRAWKA DLA KOYEB ---
+# --- POPRAWKA DLA KOYEB (Obsługa pętli zdarzeń) ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -29,40 +28,33 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
-# Globalna lista linii z pliku wiedzy
+# Wczytywanie bazy wiedzy z pliku knowledge.txt (3MB)
 KNOWLEDGE_LINES = []
-
-def load_knowledge():
-    """Wczytuje wyczyszczony plik tekstowy."""
-    if os.path.exists("knowledge.txt"):
-        try:
-            with open("knowledge.txt", "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                # Czyścimy puste linie
-                return [l.strip() for l in lines if l.strip()]
-        except Exception as e:
-            print(f"Błąd wczytywania knowledge.txt: {e}")
-            return []
-    print("BŁĄD: Nie znaleziono pliku knowledge.txt!")
-    return []
-
-KNOWLEDGE_LINES = load_knowledge()
-print(f"Załadowano {len(KNOWLEDGE_LINES)} linii wiedzy.")
+if os.path.exists("knowledge.txt"):
+    try:
+        with open("knowledge.txt", "r", encoding="utf-8") as f:
+            KNOWLEDGE_LINES = [l.strip() for l in f.readlines() if l.strip()]
+        print(f"Załadowano {len(KNOWLEDGE_LINES)} linii z bazy wiedzy.")
+    except Exception as e:
+        print(f"Błąd wczytywania knowledge.txt: {e}")
+else:
+    print("BŁĄD: Nie znaleziono pliku knowledge.txt na serwerze!")
 
 # =========================
-# INTELIGENTNE SZUKANIE (RAG)
+# INTELIGENTNE WYSZUKIWANIE (RAG)
 # =========================
-def get_context(query, max_chars=20000):
-    """Szuka w pliku tekstowym linii pasujących do pytania."""
+def get_context(query, max_chars=15000):
+    """Przeszukuje plik knowledge.txt w poszukiwaniu fragmentów pasujących do pytania."""
     # Słowa kluczowe (min. 4 litery)
     keywords = re.findall(r'\b\w{4,}\b', query.lower())
+    
     if not keywords:
-        # Jeśli nie ma słów kluczowych, dajemy ostatnie 100 linii jako ogólny kontekst
-        return "\n".join(KNOWLEDGE_LINES[-100:])
+        # Jeśli brak słów kluczowych, bierzemy ostatnie 80 linii jako ogólny kontekst
+        return "\n".join(KNOWLEDGE_LINES[-80:])
 
     matches = []
     current_len = 0
-    # Przeszukujemy od najnowszych wpisów (od dołu pliku)
+    # Przeszukujemy bazę od najświeższych wpisów (od dołu pliku)
     for line in reversed(KNOWLEDGE_LINES):
         if any(kw in line.lower() for kw in keywords):
             matches.append(line)
@@ -70,69 +62,87 @@ def get_context(query, max_chars=20000):
             if current_len > max_chars:
                 break
     
-    if not matches:
-        return "\n".join(KNOWLEDGE_LINES[-50:])
-    
-    return "\n".join(reversed(matches))
+    return "\n".join(reversed(matches)) if matches else "\n".join(KNOWLEDGE_LINES[-40:])
 
 # =========================
-# KONFIGURACJA AI
+# KONFIGURACJA GEMINI 2.0 FLASH
 # =========================
 genai.configure(api_key=GEMINI_KEY)
 
-def get_model(context_text):
-    # Twój spersonalizowany charakter bota
+async def ask_gemini_2_0(user_query, context_text):
+    # Twój specyficzny charakter bota
     sys_prompt = (
         "Jesteś wyluzowanym asystentem na grupie Telegram. "
         "Masz specyficzny, nieco szorstki styl bycia – możesz czasem przekląć (używaj 'kurwa'), "
-        "ale nie obrażaj użytkownika i nie nazywaj go debilem. "
-        "Odpowiadaj krótko i zwięźle. PISZ ZAWSZE PO POLSKU. "
-        "Jeśli w dostarczonych danych nie ma odpowiedzi, powiedz szczerze, że nie wiesz. "
-        "Nie wymyślaj niczego, czego nie ma w logach.\n\n"
-        f"Wiedza z logów gry:\n{context_text}"
+        "ale NIE obrażaj użytkownika i NIE nazywaj go debilem. "
+        "Odpowiadaj krótko, zwięźle i konkretnie. PISZ ZAWSZE PO POLSKU. "
+        "Jeśli w dostarczonych logach nie ma odpowiedzi, powiedz szczerze: 'Nie wiem kurwa, nikt o tym nie pisał'. "
+        "Nie wymyślaj informacji, których nie ma w historii gry.\n\n"
+        f"OTO DANE Z TWOJEJ BAZY WIEDZY:\n{context_text}"
     )
-    return genai.GenerativeModel(model_name="gemini-1.5-flash", system_instruction=sys_prompt)
+
+    try:
+        # Ustawienie modelu Gemini 2.0 Flash
+        model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash", 
+            system_instruction=sys_prompt
+        )
+        
+        # Generowanie odpowiedzi (uruchomione w wątku, aby nie blokować bota)
+        response = await asyncio.to_thread(model.generate_content, user_query)
+        
+        if response and response.text:
+            return response.text
+        return "Coś mnie przyblokowało, nie mam odpowiedzi."
+        
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str:
+            return "Kurwa, za dużo pytań naraz. Dajcie mi minutę oddechu."
+        if "404" in err_str:
+            return "Błąd 404: Model Gemini 2.0 Flash nie został znaleziony. Sprawdź ustawienia API."
+        return f"Wystąpił błąd techniczny: {err_str[:60]}"
 
 # =========================
-# SERWER WWW I LOGIKA TG
+# SERWER WWW I OBSŁUGA TELEGRAMA
 # =========================
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot is running!", 200
+def home(): return "Bot Gemini 2.0 Flash is live!", 200
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text: return
+    
+    # Sprawdzanie czy bot ma odpowiedzieć (tylko na dozwolonych grupach)
     if update.effective_chat.id not in ALLOWED_GROUPS: return
 
+    # Bot reaguje tylko na komendę /gpt
     if msg.text.lower().startswith('/gpt'):
         user_query = msg.text.replace('/gpt', '', 1).strip()
+        
         if not user_query:
-            await msg.reply_text("O co kurwa pytasz? Napisz coś po /gpt.")
+            await msg.reply_text("O co kurwa pytasz? Napisz coś sensownego po /gpt.")
             return
 
-        # Wyciągamy tylko pasujące fragmenty z 3MB pliku
+        # 1. Pobierz tylko ważne fragmenty z pliku 3MB
         context_data = get_context(user_query)
-        model = get_model(context_data)
-
-        try:
-            # Generowanie odpowiedzi
-            response = await asyncio.to_thread(model.generate_content, user_query)
-            if response and response.text:
-                await msg.reply_text(response.text)
-            else:
-                await msg.reply_text("AI milczy. Spróbuj zadać pytanie inaczej.")
-        except Exception as e:
-            err = str(e)
-            if "429" in err:
-                await msg.reply_text("Kurwa, za dużo pytań. Poczekaj minutę.")
-            else:
-                await msg.reply_text(f"Błąd: {err[:60]}")
+        
+        # 2. Zapytaj najnowszy model Gemini 2.0 Flash
+        answer = await ask_gemini_2_0(user_query, context_data)
+        
+        # 3. Odpowiedz na grupie
+        await msg.reply_text(answer)
 
 def main():
+    # Start serwera Flask w osobnym wątku (wymagane przez Koyeb)
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+    
+    # Inicjalizacja bota Telegram
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
     application.add_handler(MessageHandler(filters.TEXT, handle_message))
+    
+    print("Bot Gemini 2.0 Flash wystartował...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
