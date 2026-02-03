@@ -1,12 +1,9 @@
 import os
 import asyncio
 import sys
-import io
-import base64
-import requests
+import json
 from threading import Thread
 from flask import Flask
-from collections import deque
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import (
@@ -16,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-# --- OPCJA NUKLEARNA DLA WINDOWS ---
+# --- POPRAWKA DLA WINDOWS ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -31,156 +28,101 @@ telegram.ext.JobQueue = DummyJobQueue
 # =========================
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-MAX_HISTORY = 200
-chat_histories = {}
 
-# --- CHARAKTER BOTA ---
-SYSTEM_PROMPT = """
+def parse_telegram_json(file_path):
+    """Wyciąga tekst z pojedynczego pliku JSON Telegrama."""
+    if not os.path.exists(file_path):
+        print(f"INFO: Plik {file_path} nie istnieje. Pomijam.")
+        return ""
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        messages = data.get("messages", [])
+        extracted = []
+        
+        for m in messages:
+            if m.get("type") == "message" and m.get("text"):
+                sender = m.get("from", "Anonim")
+                text_field = m.get("text")
+                
+                # Telegram JSON może mieć tekst jako string lub listę obiektów
+                if isinstance(text_field, list):
+                    clean_text = "".join([part["text"] if isinstance(part, dict) else str(part) for part in text_field])
+                else:
+                    clean_text = str(text_field)
+                
+                extracted.append(f"{sender}: {clean_text}")
+        
+        return "\n".join(extracted)
+    except Exception as e:
+        print(f"BŁĄD przy {file_path}: {e}")
+        return ""
+
+# Wczytujemy dane z obu plików
+print("Ładowanie bazy wiedzy...")
+KNOWLEDGE_1 = parse_telegram_json("result.json")
+KNOWLEDGE_2 = parse_telegram_json("result1.json")
+FULL_KNOWLEDGE = KNOWLEDGE_1 + "\n\n--- DANE Z DRUGIEJ GRUPY ---\n\n" + KNOWLEDGE_2
+
+# --- CHARAKTER BOTA (SYSTEM PROMPT) ---
+SYSTEM_PROMPT = f"""
 Jesteś wyluzowanym asystentem na grupie Telegram. 
 Masz specyficzny, nieco szorstki styl bycia – możesz czasem przekląć, 
-ale nie obrażaj użytkownika i nie nazywaj go debilem
-"""
+ale nie obrażaj użytkownika i nie nazywaj go debilem.
 
-if not GEMINI_KEY or not TG_TOKEN:
-    print("BŁĄD: Brak zmiennych środowiskowych w Koyeb!")
-    sys.exit(1)
+TWOJA WIEDZA O GRZE (Dane z dwóch grup, mogą być w różnych językach):
+{FULL_KNOWLEDGE[:900000]} 
+
+ZASADY: 
+1. ODPOWIADAJ ZAWSZE I WYŁĄCZNIE PO POLSKU. Nawet jeśli informacja w bazie wiedzy jest po angielsku lub w innym języku, przetłumacz ją w głowie i odpisz po polsku.
+2. Jeśli użytkownik pyta o mechaniki gry, plany lub historię z grup, szukaj odpowiedzi w powyższych danych.
+3. Jeśli w danych nie ma odpowiedzi i Ty też jej nie znasz, powiedz szczerze: "Nie wiem kurwa, nikt o tym nie pisał w tych logach". 
+4. Nigdy nie zmyślaj faktów o grze. Jeśli nie masz dowodów - nie wiesz.
+"""
 
 # =========================
 # INICJALIZACJA AI
 # =========================
 genai.configure(api_key=GEMINI_KEY)
-
-def get_best_model():
-    try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        priority_list = ["2.5-flash", "2.0-flash", "1.5-flash", "flash-latest"]
-        selected = next((m for p in priority_list for m in available_models if p in m.lower()), "models/gemini-1.5-flash")
-        return genai.GenerativeModel(model_name=selected, system_instruction=SYSTEM_PROMPT)
-    except:
-        return genai.GenerativeModel("models/gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
-
-model = get_best_model()
+# Używamy modelu Flash 1.5, który świetnie radzi sobie z dużym kontekstem
+model = genai.GenerativeModel(model_name="gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
 
 # =========================
-# GENEROWANIE OBRAZU Z KONTEKSTEM
-# =========================
-def generate_image_with_context(user_request, history_list):
-    """Analizuje historię i tworzy obraz na jej podstawie."""
-    history_text = "\n".join(history_list)
-    
-    # Prosimy Gemini o stworzenie promptu dla Imagen na podstawie historii
-    analysis_prompt = (
-        f"Na podstawie poniższej historii rozmów z grupy:\n{history_text}\n\n"
-        f"Oraz prośby użytkownika: '{user_request if user_request else 'Stwórz obraz podsumowujący tę rozmowę'}'\n\n"
-        "Stwórz bardzo szczegółowy, artystyczny opis obrazu po angielsku (Image Prompt). "
-        "Zwróć TYLKO opis po angielsku, bez żadnych dodatkowych komentarzy."
-    )
-    
-    try:
-        analysis_model = genai.GenerativeModel("gemini-1.5-flash")
-        eng_prompt_resp = analysis_model.generate_content(analysis_prompt)
-        english_prompt = eng_prompt_resp.text.strip()
-        print(f"Wygenerowany prompt dla Imagen: {english_prompt}")
-    except Exception as e:
-        print(f"Błąd analizy historii: {e}")
-        english_prompt = user_request if user_request else "Abstract representation of a digital conversation"
-
-    # Wywołanie Imagen 4.0
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key={GEMINI_KEY}"
-    payload = {
-        "instances": [{"prompt": english_prompt}],
-        "parameters": {"sampleCount": 1}
-    }
-    
-    try:
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if "predictions" in data and len(data["predictions"]) > 0:
-                img_b64 = data["predictions"][0]["bytesBase64Encoded"]
-                return io.BytesIO(base64.b64decode(img_b64)), english_prompt
-    except Exception as e:
-        print(f"Błąd API Imagen: {e}")
-    return None, None
-
-# =========================
-# SERWER FLASK
+# SERWER WWW i LOGIKA
 # =========================
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot is running!", 200
-def run_flask():
-    try: app.run(host="0.0.0.0", port=8080)
-    except: pass
+def home(): return "Bot is running with double JSON knowledge!", 200
 
-# =========================
-# HANDLER WIADOMOŚCI
-# =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg: return
-    chat_id = update.effective_chat.id
-    if chat_id not in ALLOWED_GROUPS: return
+    if not msg or not msg.text: return
+    if update.effective_chat.id not in ALLOWED_GROUPS: return
 
-    incoming_text = msg.text or msg.caption or ""
-    user_name = msg.from_user.first_name or "Użytkownik"
+    if msg.text.lower().startswith('/gpt'):
+        prompt = msg.text.replace('/gpt', '', 1).strip()
+        query = prompt if prompt else "Przejrzyj dane i powiedz, co ciekawego ustalili gracze w obu grupach."
 
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = deque(maxlen=MAX_HISTORY)
-
-    # 1. GENEROWANIE OBRAZU (/img)
-    if incoming_text.lower().startswith('/img'):
-        user_req = incoming_text.replace('/img', '', 1).strip()
-        status_msg = await msg.reply_text("Dobra, kurwa, czytam o czym pisaliście i zaraz to narysuję...")
-        
-        # Pobieramy historię
-        history = list(chat_histories[chat_id])
-        
-        # Generujemy obraz w tle
-        loop = asyncio.get_event_loop()
-        img_data, used_prompt = await loop.run_in_executor(None, generate_image_with_context, user_req, history)
-        
-        await status_msg.delete()
-        
-        if img_data:
-            caption = f"Namalowałem to, co wywnioskowałem z waszego bełkotu.\n\nPrompt AI: {used_prompt[:200]}..."
-            await msg.reply_photo(photo=img_data, caption=caption)
-        else:
-            await msg.reply_text("Coś się zjebało i pędzel mi pękł. Spróbuj później.")
-
-    # 2. CZAT AI (/gpt)
-    elif incoming_text.lower().startswith('/gpt'):
-        prompt = incoming_text.replace('/gpt', '', 1).strip()
-        history_context = "\n".join(list(chat_histories[chat_id]))
-        final_prompt = prompt if prompt else "Streść mi o czym tu pisali."
-        
         try:
-            content = [f"HISTORIA GRUPY:\n{history_context}\n\nPYTANIE: {final_prompt}"]
-            if msg.photo:
-                file = await msg.photo[-1].get_file()
-                content.append({"mime_type": "image/jpeg", "data": bytes(await file.download_as_bytearray())})
-            
-            response = model.generate_content(content)
+            # Generowanie odpowiedzi (Gemini automatycznie przetłumaczy wiedzę na polski wg instrukcji)
+            response = model.generate_content(query)
             if response and response.text:
                 await msg.reply_text(response.text)
-        except:
-            await msg.reply_text("Błąd przy gadaniu z AI.")
+            else:
+                await msg.reply_text("Kurwa, AI nic nie odpowiedziało. Może znowu filtry.")
+        except Exception as e:
+            print(f"Błąd AI: {e}")
+            await msg.reply_text("Coś się zjebało przy łączeniu z mózgiem bota.")
 
-    # 3. ZAPIS DO HISTORII
-    else:
-        if incoming_text:
-            chat_histories[chat_id].append(f"{user_name}: {incoming_text}")
-
-# =========================
-# START
-# =========================
 def main():
-    Thread(target=run_flask, daemon=True).start()
-    print("Uruchamiam bota z WIZJĄ i INTELIGENTNYM IMAGENEM...")
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT, handle_message))
     application.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
+
