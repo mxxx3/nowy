@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-# --- POPRAWKA DLA WINDOWS/KOYEB ---
+# --- POPRAWKA DLA KOYEB/WINDOWS ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -30,7 +30,6 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
-# Globalna baza wiadomości
 ALL_MESSAGES = []
 
 def load_and_parse_json(file_path):
@@ -52,22 +51,23 @@ def load_and_parse_json(file_path):
     except Exception as e:
         print(f"Błąd ładowania {file_path}: {e}")
 
-print("Ładowanie bazy wiedzy...")
+print("Wczytywanie bazy wiedzy...")
 load_and_parse_json("result.json")
 load_and_parse_json("result1.json")
 print(f"Załadowano {len(ALL_MESSAGES)} wiadomości.")
 
 # =========================
-# WYSZUKIWANIE KONTEKSTU (RAG)
+# INTELIGENTNE WYSZUKIWANIE (RAG)
 # =========================
-def get_relevant_context(query, max_chars=12000):
+def get_relevant_context(query, max_chars=18000):
+    # Szukamy słów kluczowych (min. 4 litery)
     keywords = re.findall(r'\b\w{4,}\b', query.lower())
     if not keywords:
-        return "\n".join(ALL_MESSAGES[-80:])
+        return "\n".join(ALL_MESSAGES[-100:])
     
     found = []
     length = 0
-    # Przeszukujemy od najnowszych
+    # Przeszukujemy od najświeższych wiadomości
     for msg in reversed(ALL_MESSAGES):
         if any(kw in msg.lower() for kw in keywords):
             found.append(msg)
@@ -75,51 +75,38 @@ def get_relevant_context(query, max_chars=12000):
             if length > max_chars:
                 break
     
-    return "\n".join(reversed(found)) if found else "\n".join(ALL_MESSAGES[-40:])
+    # Jeśli nic nie znaleziono, dajemy ostatnie 50 wiadomości jako ogólny kontekst
+    return "\n".join(reversed(found)) if found else "\n".join(ALL_MESSAGES[-50:])
 
 # =========================
-# INTELIGENTNY WYBÓR MODELU
+# KONFIGURACJA MODELU FLASH 1.5
 # =========================
 genai.configure(api_key=GEMINI_KEY)
 
-def get_chat_model(context_text):
-    # Twój spersonalizowany prompt
+def get_flash_model(context_text):
+    # Twoja instrukcja systemowa - krótko, szorstko, bez obrażania
     sys_instruction = (
         "Jesteś wyluzowanym asystentem na grupie Telegram. "
-        "Masz specyficzny, nieco szorstki styl bycia – możesz czasem przekląć (używaj 'kurwa'), "
-        "ale nie obrażaj użytkownika i nie nazywaj go debilem. Odpowiadaj krótko i zwięźle. "
-        "Piszesz po polsku za każdym razem. Jeśli nie znasz odpowiedzi, po prostu powiedz, że nie wiesz. "
-        "Nie wymyślaj informacji bez wiarygodnych dowodów w logach.\n\n"
-        f"OTO KONTEKST Z GRUPY:\n{context_text}"
+        "Masz specyficzny, nieco szorstki styl bycia – możesz czasem przekląć (np. kurwa), "
+        "ale nie obrażaj użytkownika i nie nazywaj go debilem. "
+        "Piszesz ZAWSZE PO POLSKU. Odpowiadaj krótko i zwięźle. "
+        "Jeśli nie znasz odpowiedzi na podstawie logów, powiedz szczerze: 'nie wiem'. "
+        "Nie wymyślaj informacji bez dowodów w historii.\n\n"
+        f"OTO KONTEKST Z TWOICH PLIKÓW JSON:\n{context_text}"
     )
 
-    try:
-        # Próbujemy znaleźć najlepszą dostępną nazwę modelu
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Lista preferencji (Flash jest najlepszy pod koszty i limity)
-        target_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-pro"]
-        
-        selected_name = "gemini-1.5-flash" # Domyślny fallback
-        for target in target_models:
-            for m_name in models:
-                if target in m_name:
-                    selected_name = m_name
-                    break
-            else: continue
-            break
-            
-        return genai.GenerativeModel(model_name=selected_name, system_instruction=sys_instruction)
-    except Exception as e:
-        print(f"Błąd przy wyborze modelu: {e}")
-        return genai.GenerativeModel(model_name="gemini-1.5-flash", system_instruction=sys_instruction)
+    # Używamy tylko i wyłącznie Gemini 1.5 Flash
+    return genai.GenerativeModel(
+        model_name="gemini-1.5-flash", 
+        system_instruction=sys_instruction
+    )
 
 # =========================
-# SERWER I OBSŁUGA TG
+# LOGIKA I SERWER
 # =========================
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot is live!", 200
+def home(): return "Bot Flash is running!", 200
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -129,26 +116,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.text.lower().startswith('/gpt'):
         user_query = msg.text.replace('/gpt', '', 1).strip()
         if not user_query:
-            await msg.reply_text("Kurwa, napisz o co Ci chodzi po tym /gpt.")
+            await msg.reply_text("O co kurwa pytasz? Napisz coś po /gpt.")
             return
 
+        # Pobierz tylko to co ważne, żeby nie palić kredytów
         context_data = get_relevant_context(user_query)
-        model = get_chat_model(context_data)
+        model = get_flash_model(context_data)
 
         try:
+            # Generowanie odpowiedzi przez Flash 1.5
             response = model.generate_content(user_query)
             if response and response.text:
                 await msg.reply_text(response.text)
             else:
-                await msg.reply_text("AI milczy. Może spytaj o coś innego.")
+                await msg.reply_text("AI milczy. Spróbuj zadać pytanie inaczej.")
         except Exception as e:
             err = str(e)
             if "429" in err:
-                await msg.reply_text("Limit zapytań przekroczony. Daj mi odpocząć minutę.")
+                await msg.reply_text("Limit zapytań przekroczony. Poczekaj z minutę.")
             elif "404" in err:
-                await msg.reply_text("Błąd modelu (404). Google coś kombinuje z nazwami.")
+                await msg.reply_text("Błąd 404: Google nie widzi modelu Flash 1.5. Sprawdź klucz API.")
             else:
-                await msg.reply_text(f"Coś się zjebało: {err[:50]}")
+                await msg.reply_text(f"Błąd techniczny: {err[:80]}")
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
