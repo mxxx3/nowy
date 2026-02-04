@@ -31,32 +31,33 @@ telegram.ext.JobQueue = DummyJobQueue
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-VOICE_NAME = "Orus" # Głos Orbita
 
-# Pamięć krótkotrwała (ostatnie wiadomości z grupy)
+# GŁOS: Charon to najniższy bas. Można zmienić na "Fenrir" lub "Rasalgethi"
+VOICE_NAME = "Charon" 
+
+# Pamięć krótkotrwała - zwiększona do 500 wiadomości
 CHAT_MEMORIES = {}
-MAX_MEMORY_SIZE = 500
+MAX_MEMORY_SIZE = 500 
 
-# Wczytywanie bazy wiedzy historycznej
+# Wczytywanie bazy wiedzy historycznej z knowledge.txt
 KNOWLEDGE_LINES = []
 if os.path.exists("knowledge.txt"):
     try:
         with open("knowledge.txt", "r", encoding="utf-8") as f:
             KNOWLEDGE_LINES = [l.strip() for l in f.readlines() if l.strip()]
-        print(f"INFO: Załadowano {len(KNOWLEDGE_LINES)} linii wiedzy historycznej.")
+        print(f"INFO: Załadowano {len(KNOWLEDGE_LINES)} linii wiedzy z pliku.")
     except Exception as e:
-        print(f"BŁĄD knowledge.txt: {e}")
+        print(f"BŁĄD pliku knowledge.txt: {e}")
 
 # =========================
-# POMOCNIKI
+# NARZĘDZIA POMOCNICZE
 # =========================
 
-def get_static_context(query, max_chars=8000):
-    """Przeszukuje plik knowledge.txt pod kątem słów kluczowych."""
+def get_static_context(query, max_chars=10000):
+    """Przeszukuje plik knowledge.txt pod kątem dopasowań (RAG)."""
     if not query: return ""
     keywords = re.findall(r'\b\w{4,}\b', query.lower())
-    if not keywords: return "\n".join(KNOWLEDGE_LINES[-40:])
-    
+    if not keywords: return "\n".join(KNOWLEDGE_LINES[-50:])
     matches = []
     current_len = 0
     for line in reversed(KNOWLEDGE_LINES):
@@ -67,7 +68,7 @@ def get_static_context(query, max_chars=8000):
     return "\n".join(reversed(matches))
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
-    """Konwertuje surowe dane PCM16 na format WAV dla Telegrama."""
+    """Konwertuje dane PCM na format WAV, aby Telegram widział to jako audio."""
     num_channels = 1
     sample_width = 2
     with io.BytesIO() as wav_buf:
@@ -81,135 +82,109 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         wav_buf.write(pcm_data)
         return wav_buf.getvalue()
 
-async def api_call(url, payload):
-    """Wysyła zapytanie do Google API z obsługą retry i backoffu."""
-    for i in range(5):
-        try:
-            res = requests.post(url, json=payload, timeout=60)
-            if res.status_code == 200:
-                return res.json()
-            elif res.status_code == 429:
-                await asyncio.sleep(2 ** i)
-            else:
-                print(f"API Error {res.status_code}: {res.text}")
-                break
-        except Exception as e:
-            print(f"Request Exception: {e}")
-            await asyncio.sleep(2 ** i)
-    return None
-
-# =========================
-# FUNKCJE AI
-# =========================
-
 async def text_to_speech(text):
-    """Zamienia tekst na głos AI (Naprawiony JSON)."""
+    """Generuje głos AI za pomocą modelu TTS."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
+    # Specjalny prompt, by głos był jeszcze niższy i bardziej 'męski'
+    voice_prompt = f"Odegrat to bardzo niskim, grubym i poważnym głosem: {text}"
     
-    # Poprawiona struktura payloadu dla TTS
     payload = {
-        "contents": [{"parts": [{"text": f"Powiedz to wyluzowanym tonem: {text}"}]}],
+        "contents": [{"parts": [{"text": voice_prompt}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": { 
                 "voiceConfig": { 
-                    "prebuiltVoiceConfig": {
-                        "voiceName": VOICE_NAME 
-                    }
+                    "prebuiltVoiceConfig": { "voiceName": VOICE_NAME }
                 } 
             }
         }
     }
-    
-    result = await api_call(url, payload)
-    if result:
-        try:
-            audio_part = result['candidates'][0]['content']['parts'][0]['inlineData']
+    try:
+        res = requests.post(url, json=payload, timeout=30)
+        if res.status_code == 200:
+            data = res.json()
+            audio_part = data['candidates'][0]['content']['parts'][0]['inlineData']
             pcm_bytes = base64.b64decode(audio_part['data'])
-            
-            # Wyciągamy rate z mimeType lub ustawiamy domyślne 24000
             rate = 24000
-            mime = audio_part.get('mimeType', '')
-            rate_match = re.search(r'rate=(\d+)', mime)
-            if rate_match: 
-                rate = int(rate_match.group(1))
-                
+            rate_match = re.search(r'rate=(\d+)', audio_part.get('mimeType', ''))
+            if rate_match: rate = int(rate_match.group(1))
             return pcm_to_wav(pcm_bytes, rate)
-        except Exception as e:
-            print(f"Błąd przetwarzania audio: {e}")
-    return None
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        return None
+
+# =========================
+# LOGIKA AI (GPT + IMG)
+# =========================
 
 async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
-    """Obsługa czatu, wizji i pamięci."""
+    """Obsługa czatu, pamięci i analizy obrazów."""
     chat_id = update.effective_chat.id
     query = text_command.replace('/gpt', '', 1).strip()
     
-    # Pobierz pamięć i kontekst
+    # Budowanie kontekstu z 500 ostatnich wiadomości i bazy knowledge
     recent_chat = "\n".join(CHAT_MEMORIES.get(chat_id, []))
     static_data = get_static_context(query)
     
     sys_prompt = (
-        "Jesteś wyluzowanym asystentem na grupie Telegram. Masz szorstki styl, "
-        "używasz 'kurwa', ale nie obrażaj rozmówcy i nie nazywaj go debilem. "
-        "Odpowiadaj krótko i wyłącznie po polsku.\n\n"
-        "BIEŻĄCY CZAT (co pisali przed chwilą):\n"
+        "Jesteś wyluzowanym asystentem. Masz styl grubego, barczystego faceta – szorstko, krótko, "
+        "używasz 'kurwa', ale pod żadnym pozorem nie nazywasz rozmówcy debilem. PISZ ZAWSZE PO POLSKU.\n\n"
+        "HISTORIA OSTATNICH 500 WIADOMOŚCI (dla kontekstu):\n"
         f"{recent_chat}\n\n"
-        "WIEDZA O GRZE (z logów):\n"
+        "DANE HISTORYCZNE Z LOGÓW GRY:\n"
         f"{static_data}\n\n"
-        "ZASADA: Jesteś modelem Gemini, więc znasz się na wszystkim. "
-        "Jeśli pytanie dotyczy gry, użyj logów. Jeśli świata, użyj wiedzy ogólnej. "
-        "Jeśli czegoś nie wiesz, powiedz 'nie wiem kurwa'."
+        "ZASADA: Jeśli nie znasz odpowiedzi, powiedz 'nie wiem kurwa'. Nigdy nie zmyślaj dowodów."
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-    parts = [{"text": query if query else "Co tam u was?"}]
+    parts = [{"text": query if query else "Analizuj sytuację."}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
-    payload = {
-        "contents": [{"parts": parts}],
-        "systemInstruction": {"parts": [{"text": sys_prompt}]}
-    }
-
-    result = await api_call(url, payload)
-    if result:
-        try:
-            answer = result['candidates'][0]['content']['parts'][0]['text']
+    try:
+        payload = {
+            "contents": [{"parts": parts}],
+            "systemInstruction": {"parts": [{"text": sys_prompt}]}
+        }
+        res = requests.post(url, json=payload, timeout=60)
+        if res.status_code == 200:
+            answer = res.json()['candidates'][0]['content']['parts'][0]['text']
+            # Wysłanie tekstu
             await update.message.reply_text(answer)
-            
-            # Generowanie i wysyłanie głosu
+            # Wysłanie głosu jako AUDIO (do łatwego zapisu)
             voice = await text_to_speech(answer)
             if voice:
-                await update.message.reply_voice(voice=io.BytesIO(voice))
-        except Exception as e:
-            print(f"Błąd odpowiedzi GPT: {e}")
-            await update.message.reply_text("Kurwa, AI coś zacięło.")
-    else:
-        await update.message.reply_text("Nie udało się połączyć z mózgiem AI.")
+                await update.message.reply_audio(
+                    audio=io.BytesIO(voice),
+                    filename="orbit_bas.wav",
+                    title="Orbit"
+                )
+    except Exception as e:
+        print(f"GPT Error: {e}")
+        await update.message.reply_text("Kurwa, coś się ścięło w mózgu AI.")
 
 async def handle_img(update: Update, text: str):
-    """Obsługa generowania obrazów Imagen 4.0."""
+    """Generowanie obrazów przez Imagen 4.0."""
     prompt = text.replace('/img', '', 1).strip()
-    if not prompt:
-        return await update.message.reply_text("Napisz co rysować, kurwa.")
+    if not prompt: return await update.message.reply_text("Napisz co mam narysować, kurwa.")
     
-    wait = await update.message.reply_text("Rysuję to, sekunda...")
+    wait = await update.message.reply_text("Rysuję to, czekaj chwilę...")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key={API_KEY}"
-    payload = {"instances": [{"prompt": prompt}], "parameters": {"sampleCount": 1}}
-    
-    result = await api_call(url, payload)
-    if result and 'predictions' in result:
-        try:
-            img_b64 = result['predictions'][0].get('bytesBase64Encoded')
-            if img_b64:
-                await update.message.reply_photo(photo=io.BytesIO(base64.b64decode(img_b64)))
-                await wait.delete()
-                return
-        except: pass
-    await wait.edit_text("Kurwa, nie udało się narysować tego obrazka.")
+    try:
+        payload = {"instances": [{"prompt": prompt}], "parameters": {"sampleCount": 1}}
+        res = requests.post(url, json=payload, timeout=60)
+        if res.status_code == 200:
+            img_b64 = res.json()['predictions'][0]['bytesBase64Encoded']
+            await update.message.reply_photo(photo=io.BytesIO(base64.b64decode(img_b64)))
+            await wait.delete()
+        else:
+            await wait.edit_text("Kurwa, błąd generatora obrazów.")
+    except Exception as e:
+        print(f"Img Error: {e}")
+        await wait.edit_text("Nie narysowało, pewnie za ostry opis.")
 
 # =========================
-# GŁÓWNA LOGIKA
+# GŁÓWNA OBSŁUGA WIADOMOŚCI
 # =========================
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,18 +192,17 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or update.effective_chat.id not in ALLOWED_GROUPS: return
 
     chat_id = update.effective_chat.id
-    user_name = msg.from_user.full_name or "Anonim"
+    user = msg.from_user.full_name or "Anonim"
     text = msg.text or msg.caption or ""
 
-    # Zapisz do pamięci bieżącej (jeśli to nie komenda)
+    # Zarządzanie pamięcią krótkotrwałą (500 wiadomości)
     if chat_id not in CHAT_MEMORIES: CHAT_MEMORIES[chat_id] = []
     if text and not text.startswith('/'):
-        clean_msg = f"{user_name}: {text}"
-        CHAT_MEMORIES[chat_id].append(clean_msg)
+        CHAT_MEMORIES[chat_id].append(f"{user}: {text}")
         if len(CHAT_MEMORIES[chat_id]) > MAX_MEMORY_SIZE:
             CHAT_MEMORIES[chat_id].pop(0)
 
-    # Przygotuj obrazek jeśli jest
+    # Przygotowanie obrazka (jeśli przesłano)
     image_b64 = None
     if msg.photo:
         try:
@@ -245,19 +219,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_img(update, text)
 
 # =========================
-# SERWER I START
+# SERWER FLASK I START
 # =========================
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot is Online!", 200
+def home(): return "Bot Active", 200
 
 def main():
-    # Flask w tle
+    # Flask w tle (dla Koyeb)
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-    # Telegram
+    # Inicjalizacja Telegrama
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot ruszył...")
+    print("Bot ruszył z pamięcią 500 wiadomości i głosem Charon...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
