@@ -103,25 +103,40 @@ async def api_call(url, payload):
 # =========================
 
 async def text_to_speech(text):
-    """Zamienia tekst na głos AI."""
+    """Zamienia tekst na głos AI (Naprawiony JSON)."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
+    
+    # Poprawiona struktura payloadu dla TTS
     payload = {
-        "contents": [{"parts": [{"text": f"Say in a cool tone: {text}"}]}],
+        "contents": [{"parts": [{"text": f"Powiedz to wyluzowanym tonem: {text}"}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": { "voiceConfig": { "voiceName": VOICE_NAME } }
+            "speechConfig": { 
+                "voiceConfig": { 
+                    "prebuiltVoiceConfig": {
+                        "voiceName": VOICE_NAME 
+                    }
+                } 
+            }
         }
     }
+    
     result = await api_call(url, payload)
     if result:
         try:
             audio_part = result['candidates'][0]['content']['parts'][0]['inlineData']
             pcm_bytes = base64.b64decode(audio_part['data'])
+            
+            # Wyciągamy rate z mimeType lub ustawiamy domyślne 24000
             rate = 24000
-            rate_match = re.search(r'rate=(\d+)', audio_part['mimeType'])
-            if rate_match: rate = int(rate_match.group(1))
+            mime = audio_part.get('mimeType', '')
+            rate_match = re.search(r'rate=(\d+)', mime)
+            if rate_match: 
+                rate = int(rate_match.group(1))
+                
             return pcm_to_wav(pcm_bytes, rate)
-        except: pass
+        except Exception as e:
+            print(f"Błąd przetwarzania audio: {e}")
     return None
 
 async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
@@ -161,12 +176,14 @@ async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
         try:
             answer = result['candidates'][0]['content']['parts'][0]['text']
             await update.message.reply_text(answer)
-            # Głos
+            
+            # Generowanie i wysyłanie głosu
             voice = await text_to_speech(answer)
             if voice:
                 await update.message.reply_voice(voice=io.BytesIO(voice))
-        except:
-            await update.message.reply_text("AI przymuliło i nie dało tekstu.")
+        except Exception as e:
+            print(f"Błąd odpowiedzi GPT: {e}")
+            await update.message.reply_text("Kurwa, AI coś zacięło.")
     else:
         await update.message.reply_text("Nie udało się połączyć z mózgiem AI.")
 
@@ -214,10 +231,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Przygotuj obrazek jeśli jest
     image_b64 = None
     if msg.photo:
-        p = await msg.photo[-1].get_file()
-        buf = io.BytesIO()
-        await p.download_to_memory(buf)
-        image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        try:
+            p = await msg.photo[-1].get_file()
+            buf = io.BytesIO()
+            await p.download_to_memory(buf)
+            image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        except: pass
 
     # Wykrywanie komend
     if text.lower().startswith('/gpt'):
