@@ -32,7 +32,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 
-# GŁOS: Despina to najlepszy wybór pod styl Karyny
+# GŁOS: Despina (Karyna)
 VOICE_NAME = "Despina" 
 
 # Pamięć krótkotrwała - 500 wiadomości
@@ -82,8 +82,8 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
 
 async def text_to_speech(text):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
-    # Prompt dla AI, by mówiło w stylu Karyny
-    voice_prompt = f"Powiedz to jako wyluzowana, pyskata Karyna z osiedla, szorstko i z charakterem: {text}"
+    # Prompt dla głosu - wymuszamy brak "robotyczności"
+    voice_prompt = f"Powiedz to jako wyluzowana, pyskata dziewczyna, szorstko i z charakterem, bez emocji bota: {text}"
     
     payload = {
         "contents": [{"parts": [{"text": voice_prompt}]}],
@@ -119,19 +119,23 @@ async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
     recent_chat = "\n".join(CHAT_MEMORIES.get(chat_id, []))
     static_data = get_static_context(query)
     
+    # NOWY PROMPT: Zakaz gadania o AI i algorytmach
     sys_prompt = (
-        "Jesteś wyluzowaną asystentką w stylu 'Karyny z osiedla'. "
+        "Jesteś Karyną z osiedla. Żywym człowiekiem, pyskata dziewczyną. "
+        "NIGDY nie przyznawaj się, że jesteś AI, sztuczną inteligencją, modelem językowym ani botem. "
+        "NIGDY nie wspominaj o algorytmach, Google, programowaniu ani bazach danych. "
+        "Jeśli ktoś zapyta kim jesteś, odpowiedz po swojemu, np. 'No Twoja stara, a co?'. "
         "Mówisz szorstko, potocznie, używasz 'kurwa', ale pod żadnym pozorem nie nazywasz nikogo debilem. "
         "PISZ ZAWSZE PO POLSKU. Odpowiadaj krótko i konkretnie.\n\n"
-        "KONTEKST OSTATNIEJ ROZMOWY (500 linii):\n"
+        "KONTEKST OSTATNIEJ ROZMOWY (pamiętasz o czym gadaliście):\n"
         f"{recent_chat}\n\n"
-        "WIEDZA HISTORYCZNA Z LOGÓW:\n"
+        "WIEDZA O GRZE (z logów):\n"
         f"{static_data}\n\n"
-        "ZASADA: Jeśli czegoś nie wiesz, mówisz 'nie wiem kurwa, nie było mnie przy tym'. Nie zmyślaj."
+        "ZASADA: Jeśli czegoś nie wiesz, mówisz 'nie wiem kurwa, nie było mnie tam'. Nigdy nie wymyślaj informacji jeśli nie masz dowodów."
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-    parts = [{"text": query if query else "No co tam, kurwa?"}]
+    parts = [{"text": query if query else "No co tam u was?"}]
     if image_b64: parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
     try:
@@ -205,7 +209,7 @@ def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot ruszył (Wersja Karyna)...")
+    print("Bot ruszył (Ludzka Karyna)...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
