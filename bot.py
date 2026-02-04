@@ -26,12 +26,12 @@ class DummyJobQueue:
 telegram.ext.JobQueue = DummyJobQueue
 
 # =========================
-# USTAWIENIA
+# KONFIGURACJA
 # =========================
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-VOICE_NAME = "Orus" # Wybrany głos dla Orbita
+VOICE_NAME = "Orus" # Głos Orbita
 
 # Pamięć krótkotrwała (ostatnie wiadomości z grupy)
 CHAT_MEMORIES = {}
@@ -52,7 +52,7 @@ if os.path.exists("knowledge.txt"):
 # =========================
 
 def get_static_context(query, max_chars=8000):
-    """Przeszukuje plik knowledge.txt pod kątem słów kluczowych (RAG)."""
+    """Przeszukuje plik knowledge.txt pod kątem słów kluczowych."""
     if not query: return ""
     keywords = re.findall(r'\b\w{4,}\b', query.lower())
     if not keywords: return "\n".join(KNOWLEDGE_LINES[-40:])
@@ -67,7 +67,7 @@ def get_static_context(query, max_chars=8000):
     return "\n".join(reversed(matches))
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
-    """Konwertuje surowe dane PCM16 na format WAV."""
+    """Konwertuje surowe dane PCM16 na format WAV dla Telegrama."""
     num_channels = 1
     sample_width = 2
     with io.BytesIO() as wav_buf:
@@ -166,7 +166,7 @@ async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
             if voice:
                 await update.message.reply_voice(voice=io.BytesIO(voice))
         except:
-            await update.message.reply_text("AI coś przymuliło i nie dało tekstu.")
+            await update.message.reply_text("AI przymuliło i nie dało tekstu.")
     else:
         await update.message.reply_text("Nie udało się połączyć z mózgiem AI.")
 
@@ -242,15 +242,4 @@ def main():
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-    application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot gotowy do akcji.")
-    application.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
     main()
-
-
-
-
