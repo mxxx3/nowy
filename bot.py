@@ -82,8 +82,8 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
 
 async def text_to_speech(text):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
-    # Prompt dla głosu - wymuszamy brak "robotyczności"
-    voice_prompt = f"Powiedz to jako wyluzowana, pyskata dziewczyna, szorstko i z charakterem, bez emocji bota: {text}"
+    # Prompt dla głosu Karyny
+    voice_prompt = f"Powiedz to jako wyluzowana, nieco pyskata dziewczyna z osiedla, szorstko ale kumpelsko: {text}"
     
     payload = {
         "contents": [{"parts": [{"text": voice_prompt}]}],
@@ -119,19 +119,19 @@ async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
     recent_chat = "\n".join(CHAT_MEMORIES.get(chat_id, []))
     static_data = get_static_context(query)
     
-    # NOWY PROMPT: Zakaz gadania o AI i algorytmach
+    # SYSTEM PROMPT: Karyna, mniej wulgaryzmów, ludzka
     sys_prompt = (
-        "Jesteś Karyną z osiedla. Żywym człowiekiem, pyskata dziewczyną. "
-        "NIGDY nie przyznawaj się, że jesteś AI, sztuczną inteligencją, modelem językowym ani botem. "
-        "NIGDY nie wspominaj o algorytmach, Google, programowaniu ani bazach danych. "
-        "Jeśli ktoś zapyta kim jesteś, odpowiedz po swojemu, np. 'No Twoja stara, a co?'. "
-        "Mówisz szorstko, potocznie, używasz 'kurwa', ale pod żadnym pozorem nie nazywasz nikogo debilem. "
-        "PISZ ZAWSZE PO POLSKU. Odpowiadaj krótko i konkretnie.\n\n"
-        "KONTEKST OSTATNIEJ ROZMOWY (pamiętasz o czym gadaliście):\n"
+        "Jesteś Karyną z osiedla. Żywym człowiekiem, pyskatą i wyluzowaną dziewczyną. "
+        "NIGDY nie przyznawaj się, że jesteś AI, modelem czy botem. "
+        "Nie używaj słów: algorytm, baza danych, programowanie. "
+        "Mówisz szorstko, potocznie, przeklinaj tylko rzadko dla podkreślenia klimatu. "
+        "PISZ ZAWSZE PO POLSKU. Odpowiadaj krótko.\n\n"
+        "HISTORIA ROZMOWY (pamiętasz o czym gadaliście):\n"
         f"{recent_chat}\n\n"
-        "WIEDZA O GRZE (z logów):\n"
+        "WIEDZA Z LOGÓW GRY:\n"
         f"{static_data}\n\n"
-        "ZASADA: Jeśli czegoś nie wiesz, mówisz 'nie wiem kurwa, nie było mnie tam'. Nigdy nie wymyślaj informacji jeśli nie masz dowodów."
+        "Jeśli czegoś nie wiesz, mów: 'Nie wiem, nie było mnie tam' albo 'Pojęcia nie mam'. "
+        "Nie zmyślaj faktów."
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
@@ -146,22 +146,32 @@ async def handle_gpt(update: Update, text_command: str, image_b64: str = None):
         res = requests.post(url, json=payload, timeout=60)
         if res.status_code == 200:
             answer = res.json()['candidates'][0]['content']['parts'][0]['text']
-            await update.message.reply_text(answer)
             
+            # Wyślij tymczasowy tekst
+            temp_msg = await update.message.reply_text(answer)
+            
+            # Wygeneruj audio
             voice = await text_to_speech(answer)
             if voice:
+                # Wyślij plik audio
                 await update.message.reply_audio(
                     audio=io.BytesIO(voice),
                     filename="karyna_voice.wav",
                     title="Karyna"
                 )
+                # USUŃ TEKST po wysłaniu audio
+                try:
+                    await temp_msg.delete()
+                except: pass
+        else:
+            await update.message.reply_text("Coś mnie ścięło, sorki.")
     except:
-        await update.message.reply_text("Kurwa, coś mnie ścięło.")
+        await update.message.reply_text("Nie udało się połączyć z bazą danych.")
 
 async def handle_img(update: Update, text: str):
     prompt = text.replace('/img', '', 1).strip()
-    if not prompt: return await update.message.reply_text("Napisz co mam narysować, kurwa.")
-    wait = await update.message.reply_text("Rysuję to, sekunda...")
+    if not prompt: return await update.message.reply_text("Napisz co narysować.")
+    wait = await update.message.reply_text("Czekaj, rzeźbię to...")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key={API_KEY}"
     try:
         res = requests.post(url, json={"instances": [{"prompt": prompt}], "parameters": {"sampleCount": 1}}, timeout=60)
@@ -209,7 +219,7 @@ def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot ruszył (Ludzka Karyna)...")
+    print("Bot ruszył (Karyna Audio Only)...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
