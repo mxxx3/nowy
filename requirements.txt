@@ -3,3 +3,4 @@ google-generativeai==0.8.4
 flask==3.1.0
 pytz
 requests
+firebase-admin
