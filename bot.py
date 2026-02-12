@@ -6,9 +6,11 @@ import base64
 import requests
 import io
 import struct
+import random
 from threading import Thread
 from flask import Flask
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -33,7 +35,8 @@ telegram.ext.JobQueue = DummyJobQueue
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-v3")
+APP_ID = os.environ.get("APP_ID", "karyna-v5")
+CHANCE_TO_CHIME_IN = 0.15 # 15% szansy na wtrącenie się bez wołania
 
 # Inicjalizacja Firebase Firestore
 fb_config_raw = os.environ.get("FIREBASE_CONFIG")
@@ -50,14 +53,13 @@ if fb_config_raw:
 else:
     db = None
 
-VOICE_NAME = "Despina" # Karyna
+VOICE_NAME = "Despina" # Nasza Karyna
 
 # =========================
 # OBSŁUGA BAZY DANYCH (Firestore)
 # =========================
 
 def save_to_db(chat_id, user, text):
-    """Zapisuje każdą wiadomość do stałej historii."""
     if not db: return
     try:
         doc_ref = db.collection('artifacts', APP_ID, 'public', 'data', 'chat_logs').document()
@@ -68,31 +70,25 @@ def save_to_db(chat_id, user, text):
             'timestamp': firestore.SERVER_TIMESTAMP
         })
     except Exception as e:
-        print(f"Błąd zapisu: {e}")
+        print(f"Błąd zapisu DB: {e}")
 
-def get_full_history(chat_id):
-    """Pobiera CAŁĄ historię czatu dla danego chat_id."""
+def get_chat_history(chat_id):
     if not db: return []
     try:
-        # Pobieramy wszystkie dokumenty z kolekcji
         docs = db.collection('artifacts', APP_ID, 'public', 'data', 'chat_logs').stream()
-        
         all_msgs = []
         for doc in docs:
             d = doc.to_dict()
             if d.get('chat_id') == str(chat_id):
                 all_msgs.append(d)
-        
-        # Sortowanie po czasie (jeśli jest timestamp)
         all_msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
-        
         return [f"{m['user']}: {m['text']}" for m in all_msgs]
     except Exception as e:
-        print(f"Błąd odczytu bazy: {e}")
+        print(f"Błąd odczytu DB: {e}")
         return []
 
 # =========================
-# GŁOS I TTS
+# TTS I AUDIO
 # =========================
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
@@ -109,10 +105,9 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         wav_buf.write(pcm_data)
         return wav_buf.getvalue()
 
-async def generate_voice(text):
+async def generate_karyna_voice(text):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
-    # Styl Karyny wymuszony w samym generatorze głosu
-    voice_prompt = f"Powiedz to jako pyskata, wyluzowana dziewczyna z osiedla: {text}"
+    voice_prompt = f"Powiedz to jako wyluzowana dziewczyna z osiedla, po kumpelsku: {text}"
     
     payload = {
         "contents": [{"parts": [{"text": voice_prompt}]}],
@@ -133,20 +128,22 @@ async def generate_voice(text):
 # CORE LOGIC
 # =========================
 
-async def ask_karyna(update: Update, prompt: str, image_b64: str = None):
+async def run_karyna_logic(update: Update, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
     
-    # Pobieramy historię bez limitów (całość z bazy)
-    full_history = get_full_history(chat_id)
-    history_context = "\n".join(full_history)
+    # Pokazujemy na Telegramie, że bot "nagrywa głos"
+    await update.get_bot().send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+
+    history_list = get_chat_history(chat_id)
+    history_context = "\n".join(history_list)
 
     sys_instruction = (
-        "Jesteś Karyną. Żywym człowiekiem, dziewczyną z osiedla. "
-        "Masz zakaz mówienia, że jesteś AI, botem czy programem. Nie znasz się na algorytmach. "
-        "Mówisz szorstko, po polsku, wyluzowanie. Używasz potocznego języka. "
-        "Jeśli czegoś nie wiesz, mówisz szczerze: 'nie wiem kurwa, nie było mnie przy tym'. "
-        "Twoim źródłem wiedzy o tym co się dzieje jest poniższa historia rozmów.\n\n"
-        "CAŁA HISTORIA ROZMÓW Z GRUPY:\n"
+        "Jesteś Karyną, żywą dziewczyną z osiedla. Nie jesteś botem ani AI. "
+        "Mówisz szorstko, potocznie, po polsku. Przeklinaj rzadko, tylko dla akcentu. "
+        "Twoim zadaniem jest komentowanie tego co piszą inni lub odpowiadanie na pytania. "
+        "Bądź wyluzowana, czasem złośliwa, ale kumpelska. "
+        "Jeśli czegoś nie wiesz, mów: 'nie wiem, nie było mnie tam'.\n\n"
+        "O CZYM GADALIŚCIE:\n"
         f"{history_context}"
     )
 
@@ -163,59 +160,60 @@ async def ask_karyna(update: Update, prompt: str, image_b64: str = None):
         res = requests.post(url, json=payload, timeout=60)
         if res.status_code == 200:
             ans = res.json()['candidates'][0]['content']['parts'][0]['text']
-            # Wyślij tymczasowy tekst
-            temp_msg = await update.message.reply_text(ans)
             
-            # Generuj audio
-            voice_wav = await generate_voice(ans)
+            # Generujemy audio (bez wysyłania tekstu)
+            voice_wav = await generate_karyna_voice(ans)
             if voice_wav:
                 await update.message.reply_audio(
                     audio=io.BytesIO(voice_wav),
                     filename="karyna.wav",
                     title="Karyna"
                 )
-                # Usuń tekst po wysłaniu audio
-                try: await temp_msg.delete()
-                except: pass
-    except:
-        await update.message.reply_text("Kurwa, coś mnie zacięło.")
+    except Exception as e:
+        print(f"Błąd Karyny: {e}")
 
 # =========================
 # HANDLERY
 # =========================
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or update.effective_chat.id not in ALLOWED_GROUPS: return
 
     user = msg.from_user.full_name or "Anonim"
     text = msg.text or msg.caption or ""
 
-    # Zawsze zapisuj do bazy (budowanie historii)
     if text:
         save_to_db(update.effective_chat.id, user, text)
 
-    # Sprawdzanie czy wywołano Karynę (słowo w tekście)
-    if "karyna" in text.lower():
-        # Przygotowanie obrazka
+    # 1. Sprawdzamy czy wywołano imieniem
+    called_by_name = "karyna" in text.lower()
+    
+    # 2. Losowa szansa na wtrącenie się (jeśli nie wywołano imieniem)
+    random_chime = random.random() < CHANCE_TO_CHIME_IN
+    
+    if called_by_name or random_chime:
         img_b64 = None
         if msg.photo:
-            p = await msg.photo[-1].get_file()
-            buf = io.BytesIO()
-            await p.download_to_memory(buf)
-            img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            try:
+                p = await msg.photo[-1].get_file()
+                buf = io.BytesIO()
+                await p.download_to_memory(buf)
+                image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            except: pass
         
-        await ask_karyna(update, text, img_b64)
+        # Wywołujemy logikę Karyny (tylko audio)
+        await run_karyna_logic(update, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna is Watching", 200
+def home(): return "Karyna Audio Only Active", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
-    print("Bot Karyna wystartował!")
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
+    print("Bot Karyna ruszył. Słucha i czasem się wtrąca!")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
