@@ -36,7 +36,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 APP_ID = os.environ.get("APP_ID", "karyna-v5")
-CHANCE_TO_CHIME_IN = 0.15 
+CHANCE_TO_CHIME_IN = 0.05 
 
 # Inicjalizacja Firebase Firestore
 fb_config_raw = os.environ.get("FIREBASE_CONFIG")
@@ -209,3 +209,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
