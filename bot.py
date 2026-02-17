@@ -14,6 +14,7 @@ from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
+    CommandHandler,
     ContextTypes,
     filters,
 )
@@ -36,11 +37,9 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 APP_ID = os.environ.get("APP_ID", "karyna-v8")
-
-# TARGET: Do kogo Karyna ma się przypieprzać (bez @)
 TARGET_USERNAME = "Tomasznikof"
 
-# Lista ziomków (nasi)
+# Pełna lista Twoich ziomków
 NASI_ZIOMKI = [
     "Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", 
     "One Way Ticket", "Bajtkojn", "Tomek", "Mando", "mateusz", "Pdablju", 
@@ -49,27 +48,27 @@ NASI_ZIOMKI = [
     "Stara Janina", "Matis64", "Kama", "Kicia", "Kociamber Auuu", "KERTH", 
     "Ulalala", "Dorcia", "Kuba", "Damian", "Marshmallow", "KarolCarlos", 
     "PIRATEPpkas Pkas", "Maniek", "HuntFiWariat9501", "Krystiano1993", 
-    "Jazda jazda", "Dottie", "Khent"
+    "Jazda jazda", "Dottie", "Khent", "XDemon"
 ]
 
+# Inicjalizacja Firebase
+db = None
 fb_config_raw = os.environ.get("FIREBASE_CONFIG")
 if fb_config_raw:
     try:
         fb_config = json.loads(fb_config_raw)
-        cred = credentials.Certificate(fb_config)
-        firebase_admin.initialize_app(cred)
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(fb_config)
+            firebase_admin.initialize_app(cred)
         db = firestore.client()
         print("INFO: Firebase podłączone.")
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
-        db = None
-else:
-    db = None
 
-VOICE_NAME = "Despina" # Karyna
+VOICE_NAME = "Despina"
 
 # =========================
-# BAZA DANYCH
+# FUNKCJE POMOCNICZE
 # =========================
 
 def save_to_db(chat_id, user, text):
@@ -85,6 +84,7 @@ def save_to_db(chat_id, user, text):
     except: pass
 
 def get_chat_history(chat_id):
+    """Pobiera historię z bazy - bez sztucznych limitów (wszystko co jest)."""
     if not db: return []
     try:
         docs = db.collection('artifacts', APP_ID, 'public', 'data', 'chat_logs').stream()
@@ -97,77 +97,67 @@ def get_chat_history(chat_id):
         return [f"{m['user']}: {m['text']}" for m in all_msgs]
     except: return []
 
-# =========================
-# GŁOS
-# =========================
-
-def pcm_to_wav(pcm_data, sample_rate=24000):
-    num_channels = 1
-    sample_width = 2
-    with io.BytesIO() as wav_buf:
-        wav_buf.write(b'RIFF')
-        wav_buf.write(struct.pack('<I', 36 + len(pcm_data)))
-        wav_buf.write(b'WAVEfmt ')
-        wav_buf.write(struct.pack('<I', 16))
-        wav_buf.write(struct.pack('<HHIIHH', 1, num_channels, sample_rate, sample_rate * num_channels * sample_width, num_channels * sample_width, sample_width * 8))
-        wav_buf.write(b'data')
-        wav_buf.write(struct.pack('<I', len(pcm_data)))
-        wav_buf.write(pcm_data)
-        return wav_buf.getvalue()
-
 async def generate_karyna_voice(text):
+    if not API_KEY: return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
-    voice_prompt = f"Powiedz to jako pyskata dziewczyna z osiedla: {text}"
     payload = {
-        "contents": [{"parts": [{"text": voice_prompt}]}],
+        "contents": [{"parts": [{"text": f"Mów po polsku, wyluzowana osiedlowa dziewczyna: {text}"}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": { "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": VOICE_NAME } } }
         }
     }
     try:
-        res = requests.post(url, json=payload, timeout=30)
+        res = requests.post(url, json=payload, timeout=20)
         if res.status_code == 200:
             audio_data = res.json()['candidates'][0]['content']['parts'][0]['inlineData']
-            return pcm_to_wav(base64.b64decode(audio_data['data']), 24000)
+            pcm_bytes = base64.b64decode(audio_data['data'])
+            with io.BytesIO() as wav_buf:
+                wav_buf.write(b'RIFF')
+                wav_buf.write(struct.pack('<I', 36 + len(pcm_bytes)))
+                wav_buf.write(b'WAVEfmt ')
+                wav_buf.write(struct.pack('<I', 16))
+                wav_buf.write(struct.pack('<HHIIHH', 1, 1, 24000, 24000*2, 2, 16))
+                wav_buf.write(b'data')
+                wav_buf.write(struct.pack('<I', len(pcm_bytes)))
+                wav_buf.write(pcm_bytes)
+                return wav_buf.getvalue()
     except: return None
 
 # =========================
-# LOGIKA AI
+# GŁÓWNA LOGIKA KARYNY
 # =========================
 
-async def run_karyna_logic(update: Update, prompt: str, image_b64: str = None, is_target_user: bool = False):
+async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None, is_target_user: bool = False):
     chat_id = update.effective_chat.id
-    await update.get_bot().send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
     history_context = "\n".join(get_chat_history(chat_id))
     ziomki_str = ", ".join(NASI_ZIOMKI)
 
-    # Specjalna instrukcja nienawiści do Tomka
+    # Specjalne nastawienie na Tomka
     tomasz_focus = ""
     if is_target_user:
         tomasz_focus = (
-            f"UWAGA: Prawie na pewno pisze do Ciebie @{TARGET_USERNAME}. "
-            "Nienawidzisz go, uważasz go za dzbana. Przypieprz się do niego, "
-            "wyśmiej go, bądź złośliwa. Niech poczuje, że nie ma tu życia."
+            f"UWAGA: Teraz pisze do Ciebie @{TARGET_USERNAME}. "
+            "To jest ten dzban, którego nie lubisz. Przypieprz się do niego ostro, "
+            "wyśmiej go, bądź złośliwa i pyskata. Nie daj mu dojść do słowa."
         )
 
     sys_instruction = (
-        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem. "
-        "Mówisz szorstko, potocznie, po polsku. Przeklinasz rzadko.\n\n"
-        f"TWOI ZIOMKI: {ziomki_str}\n"
-        f"{tomasz_focus}\n\n"
-        "ZASADY:\n"
-        "- Nie gadaj o technologii.\n"
-        "- Nie usuwaj tekstu, napisz go normalnie.\n"
-        "- Jak Tomasznikof coś pisze, to go gnoisz.\n"
-        "- Jeśli nie znasz odpowiedzi, mów 'nie wiem kurwa'.\n\n"
-        "PAMIĘĆ:\n"
-        f"{history_context}"
+        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem.\n"
+        f"TWOI ZIOMKI (NASZA EKIPA): {ziomki_str}\n"
+        f"{tomasz_focus}\n"
+        "Mów szorstko, potocznie, po polsku. Przeklinaj rzadko, tylko dla akcentu.\n"
+        "Jeśli ktoś wrzuca raport z gry, analizuj go pod kątem naszych ziomków. "
+        "Jeśli przegrali, pociesz ich lub zgaś wroga. Jeśli wygrali, chwal ich.\n"
+        "NIGDY nie przyznawaj się, że jesteś AI.\n"
+        "Jeśli nie wiesz co powiedzieć, powiedz 'nie wiem kurwa'.\n"
+        f"HISTORIA CZATU:\n{history_context}"
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-    parts = [{"text": prompt if prompt else "No co tam dzbanki?"}]
+    parts = [{"text": prompt if prompt else "No co tam?"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -176,39 +166,45 @@ async def run_karyna_logic(update: Update, prompt: str, image_b64: str = None, i
             "contents": [{"parts": parts}],
             "systemInstruction": {"parts": [{"text": sys_instruction}]}
         }
-        res = requests.post(url, json=payload, timeout=60)
+        res = requests.post(url, json=payload, timeout=30)
         if res.status_code == 200:
             ans = res.json()['candidates'][0]['content']['parts'][0]['text']
             
-            # Wysłanie tekstu (zgodnie z prośbą: zostaje na czacie)
+            # Wysłanie tekstu (zostaje na czacie)
             await update.message.reply_text(ans)
             
-            # Wysłanie głosu
-            voice_wav = await generate_karyna_voice(ans)
-            if voice_wav:
-                await update.message.reply_audio(
-                    audio=io.BytesIO(voice_wav), 
-                    filename="karyna_pyskuje.wav", 
-                    title="Karyna"
-                )
+            # Wysłanie audio
+            voice = await generate_karyna_voice(ans)
+            if voice:
+                await update.message.reply_audio(audio=io.BytesIO(voice), filename="karyna.wav", title="Karyna mówi")
+        else:
+            print(f"Błąd Gemini: {res.status_code}")
     except Exception as e:
-        print(f"AI Error: {e}")
+        print(f"Błąd logiczny: {str(e)}")
 
 # =========================
 # HANDLERY
 # =========================
 
+async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"ID tej grupy to: {update.effective_chat.id}")
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or update.effective_chat.id not in ALLOWED_GROUPS: return
+    if not msg: return
+    
+    if update.effective_chat.id not in ALLOWED_GROUPS:
+        return
 
     user = msg.from_user.full_name or "Anonim"
     username = msg.from_user.username or ""
     text = msg.text or msg.caption or ""
     image_b64 = None
 
+    # Zapisz każdą wiadomość do bazy dla historii
     if text: save_to_db(update.effective_chat.id, user, text)
 
+    # Analiza obrazka
     if msg.photo:
         try:
             p = await msg.photo[-1].get_file()
@@ -218,23 +214,24 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
 
     # TRIGGERY
-    called_by_name = "karyna" in text.lower()
+    is_karyna = "karyna" in text.lower()
     is_tomasz = username == TARGET_USERNAME
     
-    # Reaguje TYLKO na imię LUB na każdą wiadomość Tomka
-    if called_by_name or is_tomasz:
-        await run_karyna_logic(update, text, image_b64, is_target_user=is_tomasz)
+    # Odpowiada TYLKO jeśli wywołano imię LUB jeśli pisze Tomasznikof
+    if is_karyna or is_tomasz:
+        await run_karyna_logic(update, context, text, image_b64, is_target_user=is_tomasz)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna vs Tomasz Online", 200
+def home(): return "Karyna Live", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-    application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
+    application = ApplicationBuilder().token(TG_TOKEN).build()
+    application.add_handler(CommandHandler("id", get_id))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna ruszył. Tomasznikof ma przesrane!")
-    application.run_polling(drop_pending_updates=True)
+    print("Bot Karyna wystartował!")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
