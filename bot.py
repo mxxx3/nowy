@@ -35,11 +35,12 @@ telegram.ext.JobQueue = DummyJobQueue
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-v7")
-# Szansa na wtrącenie się (0.05 = 5%)
+APP_ID = os.environ.get("APP_ID", "karyna-v6")
+
+# SZANSA NA ODPOWIEDŹ BEZ WOŁANIA (5%)
 CHANCE_TO_CHIME_IN = 0.05 
 
-# Lista Twoich ziomków
+# LISTA NASZYCH LUDZI (ZIOMKI)
 NASI_ZIOMKI = [
     "Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", 
     "One Way Ticket", "Bajtkojn", "Tomek", "Mando", "mateusz", "Pdablju", 
@@ -51,6 +52,7 @@ NASI_ZIOMKI = [
     "Jazda jazda", "Dottie", "Khent"
 ]
 
+# Inicjalizacja Firebase Firestore
 fb_config_raw = os.environ.get("FIREBASE_CONFIG")
 if fb_config_raw:
     try:
@@ -58,17 +60,17 @@ if fb_config_raw:
         cred = credentials.Certificate(fb_config)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        print("INFO: Firebase podłączone.")
+        print("INFO: Firebase podłączone pomyślnie.")
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
         db = None
 else:
     db = None
 
-VOICE_NAME = "Despina"
+VOICE_NAME = "Despina" # Karyna
 
 # =========================
-# BAZA DANYCH
+# BAZA DANYCH (Firestore)
 # =========================
 
 def save_to_db(chat_id, user, text):
@@ -81,7 +83,8 @@ def save_to_db(chat_id, user, text):
             'text': text,
             'timestamp': firestore.SERVER_TIMESTAMP
         })
-    except: pass
+    except Exception as e:
+        print(f"Błąd zapisu DB: {e}")
 
 def get_chat_history(chat_id):
     if not db: return []
@@ -94,10 +97,12 @@ def get_chat_history(chat_id):
                 all_msgs.append(d)
         all_msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
         return [f"{m['user']}: {m['text']}" for m in all_msgs]
-    except: return []
+    except Exception as e:
+        print(f"Błąd odczytu DB: {e}")
+        return []
 
 # =========================
-# TTS (Głos)
+# TTS I AUDIO
 # =========================
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
@@ -117,6 +122,7 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
 async def generate_karyna_voice(text):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
     voice_prompt = f"Powiedz to jako wyluzowana, pyskata dziewczyna z osiedla: {text}"
+    
     payload = {
         "contents": [{"parts": [{"text": voice_prompt}]}],
         "generationConfig": {
@@ -128,35 +134,37 @@ async def generate_karyna_voice(text):
         res = requests.post(url, json=payload, timeout=30)
         if res.status_code == 200:
             audio_data = res.json()['candidates'][0]['content']['parts'][0]['inlineData']
-            return pcm_to_wav(base64.b64decode(audio_data['data']), 24000)
+            pcm_bytes = base64.b64decode(audio_data['data'])
+            return pcm_to_wav(pcm_bytes, 24000)
     except: return None
 
 # =========================
-# LOGIKA AI
+# LOGIKA KARYNY
 # =========================
 
 async def run_karyna_logic(update: Update, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
-    # Wysyłamy akcję "nagrywanie głosu"
     await update.get_bot().send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
-    history_context = "\n".join(get_chat_history(chat_id))
+    history_list = get_chat_history(chat_id)
+    history_context = "\n".join(history_list)
     ziomki_str = ", ".join(NASI_ZIOMKI)
 
     sys_instruction = (
-        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem ani AI. "
-        "Mówisz szorstko, potocznie, po polsku. Przeklinasz tylko rzadko, dla akcentu. "
-        "Nie wspominaj o technologii. Nie kłam, jeśli nie znasz odpowiedzi - powiedz 'nie wiem kurwa'.\n\n"
-        "TWOI ZIOMKI (Nasza ekipa):\n"
-        f"{ziomki_str}\n\n"
-        "Na screenach raportów ci ludzie to Twoja ekipa. Jeśli przegrali, pociesz ich albo dojeb wrogowi. "
-        "Jeśli wygrali, chwal ich. Nie udawaj zwycięstwa, gdy jest porażka.\n\n"
-        "PAMIĘĆ ROZMÓW:\n"
+        "Jesteś Karyną, żywą dziewczyną z osiedla. Nie jesteś botem ani AI. "
+        "Mówisz szorstko, potocznie, po polsku. Przeklinasz rzadko, tylko dla akcentu. "
+        "Twoim zadaniem jest komentowanie tego co piszą inni lub odpowiadanie na pytania. "
+        "NIGDY nie wspominaj o technologii. Jeśli nie znasz odpowiedzi, po prostu powiedz 'nie wiem kurwa'.\n\n"
+        f"NASI LUDZIE (TWOJA EKIPA): {ziomki_str}\n\n"
+        "Jeśli analizujesz screeny z raportami walk, pamiętaj kto jest od nas. "
+        "Jeśli nasz ziomek dostał łomot, pociesz go po swojemu albo wyzywaj przeciwnika. "
+        "Nie udawaj, że wygraliśmy, jeśli przegraliśmy.\n"
+        "HISTORIA CZATU Z BAZY DANYCH:\n"
         f"{history_context}"
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-    parts = [{"text": prompt if prompt else "Skocz po szlugi i powiedz co u ziomków."}]
+    parts = [{"text": prompt if prompt else "Co tam u was, kurwa?"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -170,12 +178,9 @@ async def run_karyna_logic(update: Update, prompt: str, image_b64: str = None):
             ans = res.json()['candidates'][0]['content']['parts'][0]['text']
             voice_wav = await generate_karyna_voice(ans)
             if voice_wav:
-                await update.message.reply_audio(
-                    audio=io.BytesIO(voice_wav), 
-                    filename="karyna.wav", 
-                    title="Karyna"
-                )
-    except: pass
+                await update.message.reply_audio(audio=io.BytesIO(voice_wav), filename="karyna.wav", title="Karyna")
+    except Exception as e:
+        print(f"Error: {e}")
 
 # =========================
 # HANDLERY
@@ -189,8 +194,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text or msg.caption or ""
     image_b64 = None
 
-    if text: save_to_db(update.effective_chat.id, user, text)
+    # Zapisz każdą wiadomość do bazy dla historii
+    if text:
+        save_to_db(update.effective_chat.id, user, text)
 
+    # Przygotowanie obrazka (jeśli jest)
     if msg.photo:
         try:
             p = await msg.photo[-1].get_file()
@@ -199,22 +207,23 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
-    is_karyna = "karyna" in text.lower()
-    is_random = random.random() < CHANCE_TO_CHIME_IN
+    # Logika wyzwalania odpowiedzi
+    called_by_name = "karyna" in text.lower()
+    random_chime = random.random() < CHANCE_TO_CHIME_IN
     
-    # Reaguje zawsze na imię LUB 5% szansy na każdą inną wiadomość (tekst lub foto)
-    if is_karyna or is_random:
+    # Odpowiada jeśli: zawołano ją po imieniu LUB wylosowano 5% szansy
+    if called_by_name or random_chime:
         await run_karyna_logic(update, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna 5% Szans Online", 200
+def home(): return "Karyna Online", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).job_queue(None).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna ruszył. 5% szansy na wtrącenie się.")
+    print("Bot Karyna ruszył. Szansa na wtrącenie: 5%.")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
