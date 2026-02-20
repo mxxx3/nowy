@@ -36,10 +36,9 @@ telegram.ext.JobQueue = DummyJobQueue
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-v8")
-TARGET_USERNAME = "Tomasznikof"
+APP_ID = os.environ.get("APP_ID", "karyna-v9")
 
-# Pełna lista Twoich ziomków
+# Lista Twoich ziomków
 NASI_ZIOMKI = [
     "Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", 
     "One Way Ticket", "Bajtkojn", "Tomek", "Mando", "mateusz", "Pdablju", 
@@ -48,7 +47,7 @@ NASI_ZIOMKI = [
     "Stara Janina", "Matis64", "Kama", "Kicia", "Kociamber Auuu", "KERTH", 
     "Ulalala", "Dorcia", "Kuba", "Damian", "Marshmallow", "KarolCarlos", 
     "PIRATEPpkas Pkas", "Maniek", "HuntFiWariat9501", "Krystiano1993", 
-    "Jazda jazda", "Dottie", "Khent", "XDemon"
+    "Jazda jazda", "Dottie", "Khent"
 ]
 
 # Inicjalizacja Firebase
@@ -65,7 +64,7 @@ if fb_config_raw:
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
 
-VOICE_NAME = "Despina"
+VOICE_NAME = "Despina" # Możesz zmienić na Kore, Zephyr itp.
 
 # =========================
 # FUNKCJE POMOCNICZE
@@ -84,7 +83,6 @@ def save_to_db(chat_id, user, text):
     except: pass
 
 def get_chat_history(chat_id):
-    """Pobiera historię z bazy - bez sztucznych limitów (wszystko co jest)."""
     if not db: return []
     try:
         docs = db.collection('artifacts', APP_ID, 'public', 'data', 'chat_logs').stream()
@@ -94,70 +92,71 @@ def get_chat_history(chat_id):
             if d.get('chat_id') == str(chat_id):
                 all_msgs.append(d)
         all_msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
-        return [f"{m['user']}: {m['text']}" for m in all_msgs]
+        return [f"{m['user']}: {m['text']}" for m in all_msgs[-100:]] # Ostatnie 100 wiadomości
     except: return []
 
 async def generate_karyna_voice(text):
     if not API_KEY: return None
+    # NOWY ENDPOINT TTS (Fix dla 404)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
     payload = {
-        "contents": [{"parts": [{"text": f"Mów po polsku, wyluzowana osiedlowa dziewczyna: {text}"}]}],
+        "contents": [{"parts": [{"text": text}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": { "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": VOICE_NAME } } }
-        }
+            "speechConfig": { 
+                "voiceConfig": { 
+                    "prebuiltVoiceConfig": { "voiceName": VOICE_NAME } 
+                } 
+            }
+        },
+        "model": "gemini-2.5-flash-preview-tts"
     }
     try:
         res = requests.post(url, json=payload, timeout=20)
         if res.status_code == 200:
             audio_data = res.json()['candidates'][0]['content']['parts'][0]['inlineData']
             pcm_bytes = base64.b64decode(audio_data['data'])
+            
+            # Konwersja PCM -> WAV (24kHz, 16-bit Mono)
             with io.BytesIO() as wav_buf:
                 wav_buf.write(b'RIFF')
                 wav_buf.write(struct.pack('<I', 36 + len(pcm_bytes)))
                 wav_buf.write(b'WAVEfmt ')
                 wav_buf.write(struct.pack('<I', 16))
-                wav_buf.write(struct.pack('<HHIIHH', 1, 1, 24000, 24000*2, 2, 16))
+                wav_buf.write(struct.pack('<HHIIHH', 1, 1, 24000, 48000, 2, 16))
                 wav_buf.write(b'data')
                 wav_buf.write(struct.pack('<I', len(pcm_bytes)))
                 wav_buf.write(pcm_bytes)
                 return wav_buf.getvalue()
-    except: return None
+    except Exception as e:
+        print(f"TTS Error: {e}")
+    return None
 
 # =========================
 # GŁÓWNA LOGIKA KARYNY
 # =========================
 
-async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None, is_target_user: bool = False):
+async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
     history_context = "\n".join(get_chat_history(chat_id))
     ziomki_str = ", ".join(NASI_ZIOMKI)
 
-    # Specjalne nastawienie na Tomka
-    tomasz_focus = ""
-    if is_target_user:
-        tomasz_focus = (
-            f"UWAGA: Teraz pisze do Ciebie @{TARGET_USERNAME}. "
-            "To jest ten dzban, którego nie lubisz. Przypieprz się do niego ostro, "
-            "wyśmiej go, bądź złośliwa i pyskata. Nie daj mu dojść do słowa."
-        )
-
     sys_instruction = (
-        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem.\n"
+        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem ani AI. "
+        "Mówisz szorstko, potocznie, po polsku. Przeklinaj rzadko, tylko dla akcentu. "
+        "Twoim zadaniem jest komentowanie tego co piszą inni lub odpowiadanie na pytania. "
+        "Bądź wyluzowana, czasem złośliwa, ale kumpelska. "
+        "Jeśli czegoś nie wiesz, po prostu powiedz że nie wiesz. Nie zmyślaj informacji.\n"
         f"TWOI ZIOMKI (NASZA EKIPA): {ziomki_str}\n"
-        f"{tomasz_focus}\n"
-        "Mów szorstko, potocznie, po polsku. Przeklinaj rzadko, tylko dla akcentu.\n"
-        "Jeśli ktoś wrzuca raport z gry, analizuj go pod kątem naszych ziomków. "
-        "Jeśli przegrali, pociesz ich lub zgaś wroga. Jeśli wygrali, chwal ich.\n"
-        "NIGDY nie przyznawaj się, że jesteś AI.\n"
-        "Jeśli nie wiesz co powiedzieć, powiedz 'nie wiem kurwa'.\n"
-        f"HISTORIA CZATU:\n{history_context}"
+        "NIGDY nie wspominaj o technologii czy algorytmach.\n"
+        f"HISTORIA CZATU Z BAZY:\n{history_context}"
     )
 
+    # NOWY ENDPOINT TEXT (Fix dla 404)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-    parts = [{"text": prompt if prompt else "No co tam?"}]
+    parts = [{"text": prompt if prompt else "Siema"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -170,17 +169,18 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         if res.status_code == 200:
             ans = res.json()['candidates'][0]['content']['parts'][0]['text']
             
-            # Wysłanie tekstu (zostaje na czacie)
+            # Wysłanie tekstu
             await update.message.reply_text(ans)
             
             # Wysłanie audio
             voice = await generate_karyna_voice(ans)
             if voice:
-                await update.message.reply_audio(audio=io.BytesIO(voice), filename="karyna.wav", title="Karyna mówi")
+                await update.message.reply_audio(audio=io.BytesIO(voice), filename="karyna.wav", title="Karyna")
         else:
-            print(f"Błąd Gemini: {res.status_code}")
+            print(f"Błąd Gemini Text: {res.status_code}")
+            await update.message.reply_text(f"Sorki, coś mnie przycięło (Błąd {res.status_code}).")
     except Exception as e:
-        print(f"Błąd logiczny: {str(e)}")
+        print(f"Exception: {e}")
 
 # =========================
 # HANDLERY
@@ -193,18 +193,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
     
+    # Obsługa grup
     if update.effective_chat.id not in ALLOWED_GROUPS:
         return
 
     user = msg.from_user.full_name or "Anonim"
-    username = msg.from_user.username or ""
     text = msg.text or msg.caption or ""
     image_b64 = None
 
     # Zapisz każdą wiadomość do bazy dla historii
     if text: save_to_db(update.effective_chat.id, user, text)
 
-    # Analiza obrazka
+    # Analiza obrazka (np. raportu)
     if msg.photo:
         try:
             p = await msg.photo[-1].get_file()
@@ -213,17 +213,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
-    # TRIGGERY
-    is_karyna = "karyna" in text.lower()
-    is_tomasz = username == TARGET_USERNAME
-    
-    # Odpowiada TYLKO jeśli wywołano imię LUB jeśli pisze Tomasznikof
-    if is_karyna or is_tomasz:
-        await run_karyna_logic(update, context, text, image_b64, is_target_user=is_tomasz)
+    # Odpowiada TYLKO jeśli wywołano imię "karyna"
+    if "karyna" in text.lower():
+        await run_karyna_logic(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Live", 200
+def home(): return "Karyna Online", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
