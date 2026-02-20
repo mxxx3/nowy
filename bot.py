@@ -35,11 +35,11 @@ telegram.ext.JobQueue = DummyJobQueue
 # =========================
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-# WAŻNE: Sprawdź to ID komendą /id po uruchomieniu!
+# Potwierdzone ID Twojej grupy:
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-final-v1")
+APP_ID = os.environ.get("APP_ID", "karyna-final-v2")
 
-# LISTA NASZYCH LUDZI (ZIOMKI)
+# LISTA TWOICH LUDZI (ZIOMKI)
 NASI_ZIOMKI = [
     "Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", 
     "One Way Ticket", "Bajtkojn", "Tomek", "Mando", "mateusz", "Pdablju", 
@@ -65,10 +65,10 @@ if fb_config_raw:
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
 
-VOICE_NAME = "Despina"
+VOICE_NAME = "Despina" # Nasza Karyna
 
 # =========================
-# NARZĘDZIA
+# NARZĘDZIA (Baza i Audio)
 # =========================
 
 def save_to_db(chat_id, user, text):
@@ -97,14 +97,15 @@ def get_chat_history(chat_id):
     except: return []
 
 async def generate_voice(text):
-    # Fix dla 404: Użycie poprawnego modelu TTS
+    # Model TTS - najnowsza ścieżka
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": text}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": { "voiceConfig": { "prebuiltVoiceConfig": { "voiceName": VOICE_NAME } } }
-        }
+        },
+        "model": "gemini-2.5-flash-preview-tts"
     }
     try:
         res = requests.post(url, json=payload, timeout=20)
@@ -124,29 +125,30 @@ async def generate_voice(text):
     except: return None
 
 # =========================
-# LOGIKA KARYNY
+# GŁÓWNA LOGIKA
 # =========================
 
 async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
-    # FIX: Użycie context.bot zamiast update.get_bot()
+    # Pokazujemy "Karyna nagrywa głos..."
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
     history_context = "\n".join(get_chat_history(chat_id))
     ziomki_str = ", ".join(NASI_ZIOMKI)
 
     sys_instruction = (
-        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem ani AI. "
-        "Mówisz szorstko, potocznie, po polsku. Przeklinaj rzadko.\n"
+        "Jesteś Karyną. Żywa dziewczyna z osiedla. Nie jesteś botem ani AI.\n"
         f"TWOI ZIOMKI (NASZA EKIPA): {ziomki_str}\n"
-        "Analizuj raporty z gry. Jeśli nasi przegrali, pociesz ich. Jak wygrali, chwal ich.\n"
-        "Jeśli nie znasz odpowiedzi, powiedz 'nie wiem kurwa'.\n"
-        f"HISTORIA CZATU:\n{history_context}"
+        "Mów szorstko, potocznie, po polsku. Przeklinaj rzadko, tylko dla akcentu.\n"
+        "Analizuj raporty walk. Jak nasi ziomkowie przegrali, pociesz ich. Jak wygrali, chwal.\n"
+        "Jeśli nie znasz odpowiedzi, po prostu powiedz że nie wiesz. Nie zmyślaj informacji.\n"
+        "NIGDY nie wspominaj o technologii czy Google.\n"
+        f"HISTORIA OSTATNICH ROZMÓW:\n{history_context}"
     )
 
-    # Fix dla 404: Poprawny model Gemini
+    # Model Gemini - najnowsza ścieżka (Fix dla 404)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={API_KEY}"
-    parts = [{"text": prompt if prompt else "Co tam?"}]
+    parts = [{"text": prompt if prompt else "Siema"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -158,29 +160,31 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         res = requests.post(url, json=payload, timeout=30)
         if res.status_code == 200:
             ans = res.json()['candidates'][0]['content']['parts'][0]['text']
-            # Wysyłamy tekst i głos
+            
+            # Wysłanie TEKSTU
             await update.message.reply_text(ans)
+            
+            # Wysłanie AUDIO
             voice_wav = await generate_voice(ans)
             if voice_wav:
-                await update.message.reply_audio(audio=io.BytesIO(voice_wav), filename="karyna.wav")
+                await update.message.reply_audio(audio=io.BytesIO(voice_wav), filename="karyna.wav", title="Karyna")
         else:
             print(f"Błąd Gemini: {res.status_code}")
     except Exception as e:
-        print(f"Błąd logiczny: {e}")
+        print(f"Błąd: {e}")
 
 # =========================
 # HANDLERY
 # =========================
 
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Komenda do sprawdzenia ID grupy."""
     await update.message.reply_text(f"ID tej grupy to: {update.effective_chat.id}")
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
     
-    # DEBUG: Jeśli Karyna milczy, sprawdź czy ID grupy jest na liście ALLOWED_GROUPS
+    # White-lista grup
     if update.effective_chat.id not in ALLOWED_GROUPS:
         return
 
@@ -188,8 +192,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text or msg.caption or ""
     image_b64 = None
 
+    # Zapisuj każdą wiadomość do bazy (budowanie pamięci)
     if text: save_to_db(update.effective_chat.id, user, text)
 
+    # Przetwarzanie zdjęć
     if msg.photo:
         try:
             p = await msg.photo[-1].get_file()
@@ -198,20 +204,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
-    # Odpowiada TYLKO jeśli wywołano imię "karyna"
+    # Reaguje TYLKO na słowo "karyna"
     if "karyna" in text.lower():
         await run_karyna_logic(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Live", 200
+def home(): return "Karyna Active", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(CommandHandler("id", get_id))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna wystartował!")
+    print("Bot Karyna wystartował poprawnie!")
     application.run_polling()
 
 if __name__ == "__main__":
