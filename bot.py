@@ -24,7 +24,7 @@ ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 MODEL_NAME = "gemini-3-flash-preview"
 DB_PATH = "karyna_history.json"
 
-# Ziomki (Wiedza stała dla AI)
+# Stała lista ziomków (tylko jako kontekst dla AI, bot ma tego nie wypisywać jako tagi)
 NASI_ZIOMKI = "Gal, Karol, Nassar, Łukasz, DonMacias, Polski Ninja, Oliv, One Way Ticket, Bajtkojn, Tomek, Mando, mateusz, Pdablju, XDemon, Michal K, SHARK, KrisFX, Halison, Wariat95, Shadows, andzia, Marzena, Kornello, Tomasz, DonMakveli, Lucifer, Stara Janina, Matis64, Kama, Kicia, Kociamber Auuu, KERTH, Ulalala, Dorcia, Kuba, Damian, Marshmallow, KarolCarlos, PIRATEPpkas Pkas, Maniek, HuntFiWariat9501, Krystiano1993, Jazda jazda, Dottie, Khent"
 
 # --- SYSTEM LOGOWANIA ---
@@ -33,7 +33,6 @@ def log(msg):
     print(f"[{timestamp}] {msg}", flush=True)
 
 # --- ZARZĄDZANIE HISTORIĄ I EKIPĄ NA DYSKU ---
-# Struktura JSON: { "chat_id": { "msgs": [], "members": { "user_id": "Name" } } }
 def load_db():
     if not os.path.exists(DB_PATH):
         return {}
@@ -55,25 +54,17 @@ def save_db(data):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in ALLOWED_GROUPS:
         return
-
+    
     db_data = load_db()
     chat_id = str(update.effective_chat.id)
-    
-    file_exists = os.path.exists(DB_PATH)
-    file_size = os.path.getsize(DB_PATH) if file_exists else 0
-    
     group_data = db_data.get(chat_id, {"msgs": [], "members": {}})
-    num_msgs = len(group_data.get("msgs", []))
     num_members = len(group_data.get("members", {}))
     
     status_msg = (
-        "📊 **Status Karyny (Disk Mode + @all)**\n\n"
-        f"📂 Plik bazy: `{'✅ Istnieje' if file_exists else '❌ Brak'}`\n"
-        f"💾 Rozmiar: `{file_size / 1024:.2f} KB`\n"
-        f"💬 Wiadomości w tej grupie: `{num_msgs}`\n"
-        f"👥 Ziomków na radarze: `{num_members}`\n"
-        f"🕒 Czas bota: `{time.strftime('%H:%M:%S')}`\n\n"
-        "Jak Karyna napisze `@all`, to oznaczy wszystkich z radaru!"
+        "📊 **Status Ekipy (Radar)**\n\n"
+        f"👥 Ziomków w bazie do oznaczania: `{num_members}`\n"
+        "Tylko te osoby zostaną oznaczone przez `@all`.\n\n"
+        "_Osoby spoza bazy nie będą wypisywane tekstowo._"
     )
     await update.message.reply_text(status_msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -96,33 +87,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in db_data:
         db_data[chat_id] = {"msgs": [], "members": {}}
     
-    # Dodaj ziomka do listy (do @all)
+    # Dodaj ziomka do bazy (prawdziwe dane do oznaczania)
     db_data[chat_id]["members"][user_id] = user_name
     
-    # Dodaj wiadomość do historii
+    # Historia
     db_data[chat_id]["msgs"].append({"u": user_name, "t": text, "ts": time.time()})
-    
-    # Limit historii
-    if len(db_data[chat_id]["msgs"]) > 100:
+    if len(db_data[chat_id]["msgs"]) > 80:
         db_data[chat_id]["msgs"].pop(0)
     
     save_db(db_data)
 
-    # 2. Sprawdź czy zawołano Karynę lub użyto @all
-    if "karyna" in text.lower() or "@all" in text.lower():
-        log(f"INFO: Wywołanie w {chat_id} od {user_name}. Pytam AI...")
+    # 2. Sprawdź czy zawołano Karynę
+    if "karyna" in text.lower():
+        log(f"INFO: Karyna wywołana w {chat_id}. Pytam AI...")
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
-        # Przygotuj historię
         history_msgs = db_data[chat_id]["msgs"]
-        history_str = "\n".join([f"{m['u']}: {m['t']}" for m in history_msgs[-30:]])
+        history_str = "\n".join([f"{m['u']}: {m['t']}" for m in history_msgs[-25:]])
 
         sys_prompt = (
-            "Jesteś Karyną. Dziewczyna z polskiego osiedla, pyskata, lojalna ziomalka. "
-            f"TWOI LUDZIE: {NASI_ZIOMKI}. Mówisz szorstko, potocznie, po polsku. "
-            "Jeśli nie znasz odpowiedzi, po prostu powiedz 'nie wiem kurwa'. "
-            "Jeśli sytuacja jest ważna, możesz zawołać wszystkich pisząc dokładnie '@all'.\n\n"
-            "OSTATNIE ROZMOWY:\n" + history_str
+            "Jesteś Karyną. Pyskata dziewczyna z polskiego osiedla. Nie jesteś AI. "
+            f"TWOJA EKIPA: {NASI_ZIOMKI}.\n"
+            "ZASADA 1: Jeśli chcesz zawołać ziomków, użyj TYLKO słowa '@all'.\n"
+            "ZASADA 2: NIGDY nie wypisuj ręcznie listy imion ziomków z listy powyżej. System sam podmieni @all na prawdziwe tagi.\n"
+            "ZASADA 3: Mów szorstko, potocznie. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'.\n\n"
+            "HISTORIA ROZMÓW:\n" + history_str
         )
 
         image_b64 = None
@@ -149,45 +138,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if res.status_code == 200:
                     ans = res.json()['candidates'][0]['content']['parts'][0]['text']
                     
-                    # MAGIA @ALL: Podmiana na linki do profilów
+                    # Logika podmiany @all na prawdziwe mentions z bazy
                     if "@all" in ans.lower():
-                        log("DEBUG: Podmieniam @all na listę ziomków.")
                         members = db_data[chat_id].get("members", {})
-                        mention_list = []
-                        for uid, name in members.items():
-                            mention_list.append(f"[{name}](tg://user?id={uid})")
-                        
-                        mentions_str = ", ".join(mention_list) if mention_list else "ekipa"
-                        ans = ans.replace("@all", mentions_str).replace("@ALL", mentions_str)
+                        if members:
+                            mention_list = [f"[{name}](tg://user?id={uid})" for uid, name in members.items()]
+                            mentions_str = ", ".join(mention_list)
+                            # Podmieniamy @all (i różne wersje wielkości liter) na listę linków
+                            import re
+                            ans = re.sub(r'@all', mentions_str, ans, flags=re.IGNORECASE)
+                        else:
+                            ans = ans.replace("@all", "ekipa")
 
                     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
                     log("SUCCESS: Odpowiedź wysłana.")
-                    
-                    # Zapisz odpowiedź do historii
-                    db_data = load_db()
-                    db_data[chat_id]["msgs"].append({"u": "Karyna", "t": ans, "ts": time.time()})
-                    save_db(db_data)
                 else:
                     log(f"BŁĄD AI {res.status_code}")
                     await update.message.reply_text(f"❌ Coś mnie przycięło (Kod {res.status_code})")
             except Exception as e:
                 log(f"WYJĄTEK AI: {e}")
 
-# --- SERWER WWW ---
+# --- SERWER ---
 app = Flask(__name__)
 @app.route("/")
-def home(): 
-    return "Karyna Disk Mode + @all Active", 200
+def home(): return "Karyna Tagging Fix Active", 200
 
 def main():
-    log(">>> START BOTA KARYNA (DISK MODE + @ALL) <<<")
+    log(">>> START BOTA KARYNA (TAGGING FIX) <<<")
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-    
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
-    
-    log(">>> KONFIGURACJA GOTOWA <<<")
     application.run_polling()
 
 if __name__ == "__main__":
