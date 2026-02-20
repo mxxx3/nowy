@@ -22,7 +22,7 @@ from telegram.ext import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- KONFIGURACJA ŚRODOWISKA ---
+# --- KONFIGURACJA ŚRODOWISKA (Koyeb Fix) ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -32,16 +32,16 @@ class DummyJobQueue:
 telegram.ext.JobQueue = DummyJobQueue
 
 # =========================
-# KONFIGURACJA MODELI 2026
+# KONFIGURACJA MODELU
 # =========================
-TEXT_MODEL = "gemini-2.5-flash-lite"
-TTS_MODEL = "gemini-2.5-flash-preview-tts"
+# Używamy jednego, potężnego i szybkiego modelu do wszystkiego
+MODEL_ID = "gemini-2.5-flash-lite"
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-2026-v1")
+APP_ID = os.environ.get("APP_ID", "karyna-multimodal-v1")
 
-# Lista Ziomków
+# Twoja ekipa (Ziomki)
 NASI_ZIOMKI = [
     "Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", 
     "One Way Ticket", "Bajtkojn", "Tomek", "Mando", "mateusz", "Pdablju", 
@@ -67,7 +67,7 @@ if fb_config_raw:
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
 
-VOICE_NAME = "Despina" 
+VOICE_NAME = "Despina" # Nasz osiedlowy głos
 
 # =========================
 # FUNKCJE POMOCNICZE
@@ -114,35 +114,7 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         return wav_buf.getvalue()
 
 # =========================
-# GENEROWANIE GŁOSU (TTS)
-# =========================
-
-async def get_voice_audio(text):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TTS_MODEL}:generateContent?key={API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": text}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": { "voiceName": VOICE_NAME }
-                }
-            }
-        }
-    }
-    
-    for i in range(3):
-        try:
-            res = requests.post(url, json=payload, timeout=30)
-            if res.status_code == 200:
-                audio_b64 = res.json()['candidates'][0]['content']['parts'][0]['inlineData']['data']
-                return pcm_to_wav(base64.b64decode(audio_b64))
-        except:
-            time.sleep(1)
-    return None
-
-# =========================
-# LOGIKA KARYNY
+# GŁÓWNA LOGIKA KARYNY
 # =========================
 
 async def run_karyna(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
@@ -154,42 +126,68 @@ async def run_karyna(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt:
     ziomki_str = ", ".join(NASI_ZIOMKI)
 
     sys_prompt = (
-        "Jesteś Karyną. Żywa dziewczyna z polskiego osiedla, pyskata, wyluzowana. "
-        "Nie jesteś AI, tylko człowiekiem. Piszesz szorstko, potocznie. "
-        "Jeśli czegoś nie wiesz, mów szczerze: 'nie wiem kurwa'. "
-        "Twoja ekipa to: " + ziomki_str + ". "
-        "Gdy widzisz raporty z gry na zdjęciach, bądź lojalna wobec swojej ekipy. "
-        "Gdy nasi przegrali, pociesz ich w swoim stylu, gdy wygrali - chwal.\n\n"
+        "Jesteś Karyną. Pyskata, wyluzowana dziewczyna z polskiego osiedla. "
+        "Jesteś człowiekiem, nie botem. Twoja ekipa (ziomki) to: " + ziomki_str + ". "
+        "Mówisz szorstko, potocznie, po polsku. "
+        "Jeśli analizujesz screeny raportów z gier, bądź lojalna wobec swojej ekipy. "
+        "Gdy nasi przegrali, pociesz ich, gdy wygrali - chwal.\n"
+        "Jeśli czegoś nie wiesz na 100%, powiedz 'nie wiem kurwa' - nie wymyślaj farmazonów.\n\n"
         "OSTATNIE ROZMOWY:\n" + history_str
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent?key={API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_ID}:generateContent?key={API_KEY}"
     
-    parts = [{"text": prompt if prompt else "Siema, co tam?"}]
+    parts = [{"text": prompt if prompt else "No co tam?"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
+    # Konfiguracja MULTIMODALNA (Tekst + Audio w jednej odpowiedzi)
     payload = {
         "contents": [{"parts": parts}],
-        "systemInstruction": {"parts": [{"text": sys_prompt}]}
+        "systemInstruction": {"parts": [{"text": sys_prompt}]},
+        "generationConfig": {
+            "responseModalities": ["TEXT", "AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": { "voiceName": VOICE_NAME }
+                }
+            }
+        }
     }
 
-    try:
-        res = requests.post(url, json=payload, timeout=40)
-        if res.status_code == 200:
-            ans_text = res.json()['candidates'][0]['content']['parts'][0]['text']
+    for i in range(3): # Retry loop
+        try:
+            res = requests.post(url, json=payload, timeout=60)
+            if res.status_code == 200:
+                data = res.json()
+                candidate_parts = data['candidates'][0]['content']['parts']
+                
+                ans_text = ""
+                audio_b64 = ""
+                
+                for part in candidate_parts:
+                    if 'text' in part:
+                        ans_text = part['text']
+                    if 'inlineData' in part:
+                        audio_b64 = part['inlineData']['data']
+
+                # Wysyłamy tekst jeśli istnieje
+                if ans_text:
+                    await update.message.reply_text(ans_text)
+                
+                # Wysyłamy audio jeśli istnieje
+                if audio_base64 := audio_b64:
+                    wav_data = pcm_to_wav(base64.b64decode(audio_base64))
+                    await update.message.reply_audio(audio=io.BytesIO(wav_data), filename="karyna.wav", title="Karyna")
+                
+                return # Wyjście po sukcesie
             
-            # Najpierw tekst
-            await update.message.reply_text(ans_text)
-            
-            # Potem audio
-            audio_data = await get_voice_audio(ans_text)
-            if audio_data:
-                await update.message.reply_audio(audio=io.BytesIO(audio_data), filename="karyna.wav", title="Karyna")
-        else:
-            await update.message.reply_text(f"❌ Gemini Error {res.status_code}. Coś mnie przycięło.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Wywaliło bota: {str(e)}")
+            time.sleep(2)
+        except Exception as e:
+            print(f"Błąd API: {e}")
+            time.sleep(2)
+
+    await update.message.reply_text("Kurwa, coś mnie zacięło. Spróbuj za chwilę.")
 
 # =========================
 # HANDLERY
@@ -216,20 +214,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
-    # Reaguje TYLKO na zawołanie
     if "karyna" in text.lower():
         await run_karyna(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna 2026 Online", 200
+def home(): return "Karyna Multimodal Online", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(CommandHandler("id", get_id))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna 2026 ruszył!")
+    print("Bot Karyna Multimodal ruszył!")
     application.run_polling()
 
 if __name__ == "__main__":
