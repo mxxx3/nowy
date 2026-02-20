@@ -22,7 +22,7 @@ from telegram.ext import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- KONFIGURACJA ŚRODOWISKA (Koyeb Fix) ---
+# --- KONFIGURACJA ŚRODOWISKA ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -32,16 +32,21 @@ class DummyJobQueue:
 telegram.ext.JobQueue = DummyJobQueue
 
 # =========================
-# KONFIGURACJA MODELU
+# KONFIGURACJA I LISTA MODELI
 # =========================
-# Używamy jednego, potężnego i szybkiego modelu do wszystkiego
-MODEL_ID = "gemini-2.5-flash-lite"
+# Bot będzie próbował tych modeli po kolei:
+MODELS_TO_TRY = [
+    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash"
+]
+
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-multimodal-v1")
+APP_ID = os.environ.get("APP_ID", "karyna-multi-v1")
 
-# Twoja ekipa (Ziomki)
 NASI_ZIOMKI = [
     "Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", 
     "One Way Ticket", "Bajtkojn", "Tomek", "Mando", "mateusz", "Pdablju", 
@@ -67,17 +72,16 @@ if fb_config_raw:
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
 
-VOICE_NAME = "Despina" # Nasz osiedlowy głos
+VOICE_NAME = "Despina"
 
 # =========================
-# FUNKCJE POMOCNICZE
+# NARZĘDZIA
 # =========================
 
 def save_to_db(chat_id, user, text):
     if not db: return
     try:
-        # Path: /artifacts/{appId}/public/data/chat_logs
-        doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').document()
+        doc_ref = db.collection('artifacts', APP_ID, 'public', 'data', 'chat_logs').document()
         doc_ref.set({
             'chat_id': str(chat_id),
             'user': user,
@@ -89,7 +93,7 @@ def save_to_db(chat_id, user, text):
 def get_chat_history(chat_id):
     if not db: return []
     try:
-        docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').stream()
+        docs = db.collection('artifacts', APP_ID, 'public', 'data', 'chat_logs').stream()
         all_msgs = []
         for doc in docs:
             d = doc.to_dict()
@@ -114,7 +118,7 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         return wav_buf.getvalue()
 
 # =========================
-# GŁÓWNA LOGIKA KARYNY
+# LOGIKA KARYNY (Z FALLBACKIEM)
 # =========================
 
 async def run_karyna(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
@@ -127,24 +131,21 @@ async def run_karyna(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt:
 
     sys_prompt = (
         "Jesteś Karyną. Pyskata, wyluzowana dziewczyna z polskiego osiedla. "
-        "Jesteś człowiekiem, nie botem. Twoja ekipa (ziomki) to: " + ziomki_str + ". "
-        "Mówisz szorstko, potocznie, po polsku. "
-        "Jeśli analizujesz screeny raportów z gier, bądź lojalna wobec swojej ekipy. "
-        "Gdy nasi przegrali, pociesz ich, gdy wygrali - chwal.\n"
-        "Jeśli czegoś nie wiesz na 100%, powiedz 'nie wiem kurwa' - nie wymyślaj farmazonów.\n\n"
+        "Nie jesteś AI, tylko człowiekiem. Piszesz szorstko, potocznie, po polsku. "
+        "Jeśli czegoś nie wiesz, mów szczerze: 'nie wiem kurwa'. "
+        "Twoja ekipa to: " + ziomki_str + ". "
+        "Gdy widzisz raporty z gier na zdjęciach, bądź lojalna wobec swojej ekipy. "
+        "Nie zmyślaj informacji, jeśli nie masz na nie dowodów w historii rozmowy.\n\n"
         "OSTATNIE ROZMOWY:\n" + history_str
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_ID}:generateContent?key={API_KEY}"
-    
-    parts = [{"text": prompt if prompt else "No co tam?"}]
+    parts = [{"text": prompt if prompt else "Siema, co tam u ziomków?"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
-    # Konfiguracja MULTIMODALNA (Tekst + Audio w jednej odpowiedzi)
     payload = {
         "contents": [{"parts": parts}],
-        "systemInstruction": {"parts": [{"text": sys_prompt}]},
+        "systemInstruction": {"parts": [{"text": sys_instruction}]},
         "generationConfig": {
             "responseModalities": ["TEXT", "AUDIO"],
             "speechConfig": {
@@ -155,9 +156,16 @@ async def run_karyna(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt:
         }
     }
 
-    for i in range(3): # Retry loop
+    # PĘTLA TESTOWANIA MODELI (Fallback)
+    success = False
+    last_error = ""
+    
+    for model_name in MODELS_TO_TRY:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
         try:
+            print(f"DEBUG: Próba wywołania modelu: {model_name}")
             res = requests.post(url, json=payload, timeout=60)
+            
             if res.status_code == 200:
                 data = res.json()
                 candidate_parts = data['candidates'][0]['content']['parts']
@@ -171,30 +179,34 @@ async def run_karyna(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt:
                     if 'inlineData' in part:
                         audio_b64 = part['inlineData']['data']
 
-                # Wysyłamy tekst jeśli istnieje
                 if ans_text:
                     await update.message.reply_text(ans_text)
                 
-                # Wysyłamy audio jeśli istnieje
-                if audio_base64 := audio_b64:
-                    wav_data = pcm_to_wav(base64.b64decode(audio_base64))
-                    await update.message.reply_audio(audio=io.BytesIO(wav_data), filename="karyna.wav", title="Karyna")
+                if audio_b64:
+                    wav_data = pcm_to_wav(base64.b64decode(audio_b64))
+                    await update.message.reply_audio(audio=io.BytesIO(wav_data), filename="karyna.wav", title=f"Karyna ({model_name})")
                 
-                return # Wyjście po sukcesie
-            
-            time.sleep(2)
+                success = True
+                print(f"INFO: Sukces z modelem {model_name}")
+                break # Przerwij pętlę po sukcesie
+            else:
+                last_error = f"{model_name} (Error {res.status_code})"
+                print(f"DEBUG: {model_name} nie zadziałał: {res.status_code}")
         except Exception as e:
-            print(f"Błąd API: {e}")
-            time.sleep(2)
+            last_error = f"{model_name} (Exception: {str(e)})"
+            print(f"DEBUG: Wyjątek dla {model_name}: {e}")
+            continue
 
-    await update.message.reply_text("Kurwa, coś mnie zacięło. Spróbuj za chwilę.")
+    if not success:
+        await update.message.reply_text(f"❌ Wszystkie modele padły. Ostatni błąd: {last_error}")
 
 # =========================
 # HANDLERY
 # =========================
 
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"ID grupy: `{update.effective_chat.id}`\nFirebase: {'✅' if db else '❌'}")
+    models_status = "\n".join([f"- {m}" for m in MODELS_TO_TRY])
+    await update.message.reply_text(f"ID grupy: `{update.effective_chat.id}`\nModele w kolejce:\n{models_status}\nFirebase: {'✅' if db else '❌'}")
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -219,14 +231,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Multimodal Online", 200
+def home(): return "Karyna Multi-Model Online", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(CommandHandler("id", get_id))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna Multimodal ruszył!")
+    print("Bot Karyna z systemem fallback wystartował.")
     application.run_polling()
 
 if __name__ == "__main__":
