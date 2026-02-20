@@ -2,7 +2,7 @@ import os
 import asyncio
 import json
 import base64
-import httpx  # Używamy httpx do zapytań równoległych
+import httpx
 import io
 import struct
 import random
@@ -10,7 +10,7 @@ import time
 from threading import Thread
 from flask import Flask
 from telegram import Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -18,8 +18,10 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# --- KONFIGURACJA ŚRODOWISKA (Koyeb Fix) ---
+# --- KONFIGURACJA ŚRODOWISKA ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -29,11 +31,11 @@ class DummyJobQueue:
 telegram.ext.JobQueue = DummyJobQueue
 
 # =========================
-# KONFIGURACJA MODELI 2026
+# KONFIGURACJA
 # =========================
 MODELS_TO_TRY = [
-    "gemini-2.5-flash-lite",
     "gemini-3-flash-preview",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-1.5-flash"
 ]
@@ -41,14 +43,81 @@ MODELS_TO_TRY = [
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
+APP_ID = os.environ.get("APP_ID", "karyna-smart-tag")
 
-# Twoja ekipa (Ziomki)
+# Twoja stała lista ziomków (dla AI)
 NASI_ZIOMKI = "Gal, Karol, Nassar, Łukasz, DonMacias, Polski Ninja, Oliv, One Way Ticket, Bajtkojn, Tomek, Mando, mateusz, Pdablju, XDemon, Michal K, SHARK, KrisFX, Halison, Wariat95, Shadows, andzia, Marzena, Kornello, Tomasz, DonMakveli, Lucifer, Stara Janina, Matis64, Kama, Kicia, Kociamber Auuu, KERTH, Ulalala, Dorcia, Kuba, Damian, Marshmallow, KarolCarlos, PIRATEPpkas Pkas, Maniek, HuntFiWariat9501, Krystiano1993, Jazda jazda, Dottie, Khent"
+
+# Inicjalizacja Firebase
+db = None
+fb_config_raw = os.environ.get("FIREBASE_CONFIG")
+if fb_config_raw:
+    try:
+        fb_config = json.loads(fb_config_raw)
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(fb_config)
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+    except: pass
 
 VOICE_NAME = "Despina"
 
 # =========================
-# NARZĘDZIA AUDIO
+# NARZĘDZIA BAZY (RULE 1 & 2)
+# =========================
+
+async def async_save_db(chat_id, user_data, text):
+    """Zapisuje wiadomość i aktualizuje listę członków."""
+    if not db: return
+    try:
+        # Zapis logów
+        doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').document()
+        doc_ref.set({
+            'chat_id': str(chat_id),
+            'user': user_data['name'],
+            'text': text,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
+        
+        # Zapamiętywanie członka ekipy do @all
+        member_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').document(str(user_data['id']))
+        member_ref.set({
+            'name': user_data['name'],
+            'username': user_data['username'],
+            'last_seen': firestore.SERVER_TIMESTAMP
+        })
+    except: pass
+
+def get_history(chat_id):
+    if not db: return []
+    try:
+        docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').stream()
+        msgs = []
+        for d in docs:
+            data = d.to_dict()
+            if data.get('chat_id') == str(chat_id):
+                msgs.append(data)
+        msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
+        return [f"{m['user']}: {m['text']}" for m in msgs[-30:]]
+    except: return []
+
+async def get_all_mentions():
+    """Tworzy string z oznaczeniami wszystkich zapamiętanych osób."""
+    if not db: return ""
+    try:
+        docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').stream()
+        mentions = []
+        for d in docs:
+            data = d.to_dict()
+            name = data.get('name', 'Ziomek')
+            uid = d.id
+            # Formatowanie Markdown dla Telegrama do oznaczenia bez username
+            mentions.append(f"[{name}](tg://user?id={uid})")
+        return ", ".join(mentions)
+    except: return ""
+
+# =========================
+# AI I AUDIO
 # =========================
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
@@ -65,34 +134,32 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         wav_buf.write(pcm_data)
         return wav_buf.getvalue()
 
-# =========================
-# LOGIKA RÓWNOLEGŁEGO WYWOŁANIA
-# =========================
-
-async def fetch_from_model(client, model_name, payload):
-    """Pojedyncze asynchroniczne zapytanie do konkretnego modelu."""
+async def fetch_ai(client, model_name, payload):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
     try:
-        response = await client.post(url, json=payload, timeout=30.0)
-        if response.status_code == 200:
-            return model_name, response.json()
-    except Exception as e:
-        print(f"DEBUG: Model {model_name} wywalił błąd: {e}")
+        res = await client.post(url, json=payload, timeout=30.0)
+        if res.status_code == 200: return model_name, res.json()
+    except: pass
     return model_name, None
 
-async def run_karyna_parallel(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
+async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
+    history_list = get_history(chat_id)
+    history_context = "\n".join(history_list)
+
     sys_instruction = (
-        "Jesteś Karyną. Pyskata, wyluzowana dziewczyna z polskiego osiedla. "
-        "Nie jesteś AI, tylko człowiekiem. Mówisz szorstko, potocznie, po polsku. "
-        "Jeśli czegoś nie wiesz, mów szczerze: 'nie wiem kurwa, nie było mnie tam'. "
-        "NASZA EKIPA (ZIOMKI): " + NASI_ZIOMKI + ". "
-        "Analizuj raporty walk na screenach. Jeśli nasi przegrali, pociesz ich. Jak wygrali, chwal."
+        "Jesteś Karyną. Pyskata dziewczyna z osiedla. Nie jesteś botem AI. "
+        "Mówisz szorstko, potocznie, po polsku.\n\n"
+        f"TWOI ZIOMKI: {NASI_ZIOMKI}.\n"
+        "Jeśli uznasz, że sytuacja jest pilna, ważna lub raport z gry jest tragiczny/genialny, "
+        "możesz oznaczyć całą ekipę wpisując w tekście `@all`. "
+        "Używaj `@all` tylko gdy naprawdę chcesz kogoś 'obudzić' lub zwrócić uwagę wszystkich.\n\n"
+        "OSTATNIE ROZMOWY:\n" + history_context
     )
 
-    parts = [{"text": prompt if prompt else "Co tam u ziomków?"}]
+    parts = [{"text": prompt if prompt else "Siema, patrzcie na to!"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -101,63 +168,58 @@ async def run_karyna_parallel(update: Update, context: ContextTypes.DEFAULT_TYPE
         "systemInstruction": {"parts": [{"text": sys_instruction}]},
         "generationConfig": {
             "responseModalities": ["TEXT", "AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": { "voiceName": VOICE_NAME }
-                }
-            }
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE_NAME}}}
         }
     }
 
-    # Wysyłamy zapytania do wszystkich modeli jednocześnie
     async with httpx.AsyncClient() as client:
-        tasks = [fetch_from_model(client, m, payload) for m in MODELS_TO_TRY]
-        
-        # Czekamy na pierwszy sukces
-        for completed_task in asyncio.as_completed(tasks):
-            model_name, result = await completed_task
-            
+        tasks = [fetch_ai(client, m, payload) for m in MODELS_TO_TRY]
+        for completed in asyncio.as_completed(tasks):
+            model_name, result = await completed
             if result:
-                # Mamy zwycięzcę! Wyciągamy dane.
                 try:
-                    candidate_parts = result['candidates'][0]['content']['parts']
-                    ans_text = ""
-                    audio_b64 = ""
-                    
-                    for part in candidate_parts:
-                        if 'text' in part: ans_text = part['text']
-                        if 'inlineData' in part: audio_b64 = part['inlineData']['data']
+                    c_parts = result['candidates'][0]['content']['parts']
+                    ans_text = next((p['text'] for p in c_parts if 'text' in p), "")
+                    audio_b64 = next((p['inlineData']['data'] for p in c_parts if 'inlineData' in p), "")
 
                     if ans_text:
-                        await update.message.reply_text(f"{ans_text}\n\n⚡️ Odpalił: {model_name}")
-                    
-                    if audio_b64:
-                        wav_data = pcm_to_wav(base64.b64decode(audio_b64))
-                        await update.message.reply_audio(
-                            audio=io.BytesIO(wav_data), 
-                            filename="karyna.wav", 
-                            title=f"Karyna mówi ({model_name})"
+                        # Jeśli AI użyło @all, podmieniamy to na listę oznaczeń
+                        if "@all" in ans_text:
+                            mentions = await get_all_mentions()
+                            ans_text = ans_text.replace("@all", mentions)
+                        
+                        # Wysyłamy tekst z obsługą Markdown (dla linków do profili)
+                        await update.message.reply_text(
+                            f"{ans_text}\n\n⚡️ {model_name}", 
+                            parse_mode=ParseMode.MARKDOWN
                         )
-                    return # Kończymy funkcję, bo już odpowiedzieliśmy
-                except:
-                    continue # Jeśli dane były wybrakowane, sprawdzamy następny zakończony task
-
-    await update.message.reply_text("Kurwa, żaden model nie odpowiedział. Sprawdź neta albo klucz API.")
+                        
+                    if audio_b64:
+                        wav = pcm_to_wav(base64.b64decode(audio_b64))
+                        await update.message.reply_audio(audio=io.BytesIO(wav), filename="karyna.wav")
+                    return
+                except: continue
 
 # =========================
 # HANDLERY
 # =========================
 
-async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"ID grupy: `{update.effective_chat.id}`\nTryb: Super Parallel (No Firebase)")
-
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or update.effective_chat.id not in ALLOWED_GROUPS: return
 
+    user_info = {
+        'id': msg.from_user.id,
+        'name': msg.from_user.full_name or "Ziomek",
+        'username': msg.from_user.username or ""
+    }
     text = msg.text or msg.caption or ""
-    image_b64 = None
+    
+    # Zapisujemy do bazy i aktualizujemy listę członków w tle
+    if text:
+        asyncio.create_task(async_save_db(update.effective_chat.id, user_info, text))
 
+    image_b64 = None
     if msg.photo:
         try:
             p = await msg.photo[-1].get_file()
@@ -166,19 +228,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
+    # Karyna reaguje na imię
     if "karyna" in text.lower():
-        await run_karyna_parallel(update, context, text, image_b64)
+        await run_karyna_logic(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Parallel Mode Active", 200
+def home(): return "Karyna Tagging Mode Active", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
-    application.add_handler(CommandHandler("id", get_id))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna (Parallel Mode) ruszył!")
+    print("Bot Karyna (Tagging Mode) ruszył!")
     application.run_polling()
 
 if __name__ == "__main__":
