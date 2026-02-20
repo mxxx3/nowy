@@ -21,7 +21,7 @@ from telegram.ext import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- KONFIGURACJA ŚRODOWISKA (Koyeb Fix) ---
+# --- KONFIGURACJA ŚRODOWISKA ---
 import telegram.ext
 class DummyJobQueue:
     def __init__(self, *args, **kwargs): pass
@@ -37,9 +37,9 @@ MODEL_NAME = "gemini-3-flash-preview"
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-3flash-final")
+APP_ID = os.environ.get("APP_ID", "karyna-3f-opti")
 
-# Stała lista ziomków dla instrukcji AI
+# Ziomki (Wiedza stała)
 NASI_ZIOMKI = "Gal, Karol, Nassar, Łukasz, DonMacias, Polski Ninja, Oliv, One Way Ticket, Bajtkojn, Tomek, Mando, mateusz, Pdablju, XDemon, Michal K, SHARK, KrisFX, Halison, Wariat95, Shadows, andzia, Marzena, Kornello, Tomasz, DonMakveli, Lucifer, Stara Janina, Matis64, Kama, Kicia, Kociamber Auuu, KERTH, Ulalala, Dorcia, Kuba, Damian, Marshmallow, KarolCarlos, PIRATEPpkas Pkas, Maniek, HuntFiWariat9501, Krystiano1993, Jazda jazda, Dottie, Khent"
 
 # Inicjalizacja Firebase (RULE 1 & 3)
@@ -52,30 +52,30 @@ if fb_config_raw:
             cred = credentials.Certificate(fb_config)
             firebase_admin.initialize_app(cred)
         db = firestore.client()
-        print("INFO: Firebase podłączone.")
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
 
 VOICE_NAME = "Despina"
 
 # =========================
-# NARZĘDZIA BAZY (RULE 1 & 2)
+# NARZĘDZIA BAZY (Zoptymalizowane pod RULE 1)
 # =========================
 
 async def async_save_db(chat_id, user_data, text):
-    """Zapisuje logi i aktualizuje członków grupy."""
+    """Zapisuje logi w dedykowanej kolekcji dla grupy."""
     if not db: return
     try:
-        # Path: /artifacts/{appId}/public/data/chat_logs
-        doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').document()
+        # Segregujemy logi po chat_id w nazwie kolekcji, żeby get_history było błyskawiczne
+        # Format: /artifacts/{appId}/public/data/logs_{chat_id}
+        collection_name = f"logs_{str(chat_id).replace('-', 'm')}"
+        doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(collection_name).document()
         doc_ref.set({
-            'chat_id': str(chat_id),
             'user': user_data['name'],
             'text': text,
             'timestamp': firestore.SERVER_TIMESTAMP
         })
         
-        # Path: /artifacts/{appId}/public/data/members
+        # Zapis członka grupy do listy @all
         member_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').document(str(user_data['id']))
         member_ref.set({
             'name': user_data['name'],
@@ -85,18 +85,20 @@ async def async_save_db(chat_id, user_data, text):
     except: pass
 
 def get_history(chat_id):
-    """Pobiera historię rozmów (RULE 2)."""
+    """Pobiera historię tylko dla tej konkretnej grupy."""
     if not db: return []
     try:
-        docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').stream()
+        collection_name = f"logs_{str(chat_id).replace('-', 'm')}"
+        # Pobieramy tylko z kolekcji tej grupy - RULE 2 (Simple query)
+        docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(collection_name).stream()
         msgs = []
         for d in docs:
             data = d.to_dict()
-            if data.get('chat_id') == str(chat_id):
-                msgs.append(data)
-        # Sortowanie w pamięci RAM
+            msgs.append(data)
+        
+        # Sortowanie i limitowanie w pamięci RAM
         msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
-        return [f"{m['user']}: {m['text']}" for m in msgs[-25:]]
+        return [f"{m['user']}: {m['text']}" for m in msgs[-20:]] # Ostatnie 20 dla kontekstu
     except: return []
 
 async def get_team_mentions():
@@ -114,7 +116,7 @@ async def get_team_mentions():
     except: return ""
 
 # =========================
-# NARZĘDZIA AUDIO
+# AUDIO I AI
 # =========================
 
 def pcm_to_wav(pcm_data, sample_rate=24000):
@@ -131,29 +133,26 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         wav_buf.write(pcm_data)
         return wav_buf.getvalue()
 
-# =========================
-# LOGIKA AI
-# =========================
-
 async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
+    # Błyskawiczne pobieranie historii tylko dla TEJ grupy
     history = get_history(chat_id)
     history_context = "\n".join(history)
 
     sys_instruction = (
-        "Jesteś Karyną. Pyskata, wyluzowana dziewczyna z polskiego osiedla. Nie jesteś botem.\n"
-        f"TWOJA EKIPA (ZIOMKI): {NASI_ZIOMKI}.\n"
-        "Mówisz szorstko, potocznie. Jeśli czegoś nie wiesz, powiedz 'nie wiem kurwa'.\n"
-        "Jeśli sytuacja jest ważna, możesz oznaczyć wszystkich pisząc '@all'.\n"
-        "Analizuj screeny z gier pod kątem lojalności dla ekipy.\n\n"
-        "OSTATNIE ROZMOWY:\n" + history_context
+        "Jesteś Karyną. Dziewczyna z osiedla, pyskata, ale lojalna wobec ziomków. "
+        f"TWOJA EKIPA: {NASI_ZIOMKI}. "
+        "Mówisz szorstko, potocznie. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'. "
+        "Analizuj raporty ze zdjęć. Jak nasi przegrali, pociesz ich. Jak wygrali, chwal. "
+        "Używaj '@all' tylko gdy sytuacja jest krytyczna.\n\n"
+        "HISTORIA OSTATNICH ROZMÓW:\n" + history_context
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
     
-    parts = [{"text": prompt if prompt else "Siema ekipa!"}]
+    parts = [{"text": prompt if prompt else "Co tam u was?"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -183,13 +182,13 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
                     
                     await update.message.reply_text(ans_text, parse_mode=ParseMode.MARKDOWN)
                 
-                if audio_b64:
-                    wav = pcm_to_wav(base64.b64decode(audio_b64))
+                if audio_base64 := audio_b64:
+                    wav = pcm_to_wav(base64.b64decode(audio_base64))
                     await update.message.reply_audio(audio=io.BytesIO(wav), filename="karyna.wav", title="Karyna")
             else:
-                await update.message.reply_text(f"❌ Błąd modelu: {res.status_code}")
+                print(f"Error AI: {res.status_code}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Padło coś: {str(e)}")
+        print(f"Logic Error: {e}")
 
 # =========================
 # HANDLER
@@ -206,7 +205,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     text = msg.text or msg.caption or ""
     
-    # Zapis w tle (Firebase)
+    # Zapis w tle (Firebase) - Teraz asynchronicznie i do własnej kolekcji
     if text:
         asyncio.create_task(async_save_db(update.effective_chat.id, user_info, text))
 
@@ -219,19 +218,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
-    # Reaguje na słowo "karyna"
+    # Odpowiada TYLKO na zawołanie
     if "karyna" in text.lower():
         await run_karyna_logic(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna 3-Flash Active", 200
+def home(): return "Karyna 3-Flash Optimized", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna (3-Flash Mode) wystartował!")
+    print("Bot Karyna (Zoptymalizowany) wystartował!")
     application.run_polling()
 
 if __name__ == "__main__":
