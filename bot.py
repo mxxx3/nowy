@@ -37,12 +37,12 @@ MODEL_NAME = "gemini-3-flash-preview"
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
+# Używamy tego samego APP_ID co wcześniej, żeby widzieć stare dane
 APP_ID = os.environ.get("APP_ID", "karyna-3f-opti")
 
-# Ziomki (Wiedza stała)
 NASI_ZIOMKI = "Gal, Karol, Nassar, Łukasz, DonMacias, Polski Ninja, Oliv, One Way Ticket, Bajtkojn, Tomek, Mando, mateusz, Pdablju, XDemon, Michal K, SHARK, KrisFX, Halison, Wariat95, Shadows, andzia, Marzena, Kornello, Tomasz, DonMakveli, Lucifer, Stara Janina, Matis64, Kama, Kicia, Kociamber Auuu, KERTH, Ulalala, Dorcia, Kuba, Damian, Marshmallow, KarolCarlos, PIRATEPpkas Pkas, Maniek, HuntFiWariat9501, Krystiano1993, Jazda jazda, Dottie, Khent"
 
-# Inicjalizacja Firebase (RULE 1 & 3)
+# Inicjalizacja Firebase
 db = None
 fb_config_raw = os.environ.get("FIREBASE_CONFIG")
 if fb_config_raw:
@@ -58,24 +58,24 @@ if fb_config_raw:
 VOICE_NAME = "Despina"
 
 # =========================
-# NARZĘDZIA BAZY (Zoptymalizowane pod RULE 1)
+# NARZĘDZIA BAZY (RULE 1 & 2)
 # =========================
 
 async def async_save_db(chat_id, user_data, text):
-    """Zapisuje logi w dedykowanej kolekcji dla grupy."""
+    """Zapisuje logi do nowej, szybkiej kolekcji."""
     if not db: return
     try:
-        # Segregujemy logi po chat_id w nazwie kolekcji, żeby get_history było błyskawiczne
-        # Format: /artifacts/{appId}/public/data/logs_{chat_id}
-        collection_name = f"logs_{str(chat_id).replace('-', 'm')}"
-        doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(collection_name).document()
+        # Nowy format zapisu (specyficzny dla grupy)
+        coll_name = f"logs_{str(chat_id).replace('-', 'm')}"
+        doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(coll_name).document()
         doc_ref.set({
+            'chat_id': str(chat_id), # Na wszelki wypadek zostawiamy ID
             'user': user_data['name'],
             'text': text,
             'timestamp': firestore.SERVER_TIMESTAMP
         })
         
-        # Zapis członka grupy do listy @all
+        # Aktualizacja listy członków do @all
         member_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').document(str(user_data['id']))
         member_ref.set({
             'name': user_data['name'],
@@ -85,33 +85,44 @@ async def async_save_db(chat_id, user_data, text):
     except: pass
 
 def get_history(chat_id):
-    """Pobiera historię tylko dla tej konkretnej grupy."""
+    """Pobiera historię łącząc stary folder 'chat_logs' z nowymi folderami grup."""
     if not db: return []
     try:
-        collection_name = f"logs_{str(chat_id).replace('-', 'm')}"
-        # Pobieramy tylko z kolekcji tej grupy - RULE 2 (Simple query)
-        docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(collection_name).stream()
-        msgs = []
-        for d in docs:
-            data = d.to_dict()
-            msgs.append(data)
+        chat_id_str = str(chat_id)
+        coll_name_new = f"logs_{chat_id_str.replace('-', 'm')}"
         
-        # Sortowanie i limitowanie w pamięci RAM
-        msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
-        return [f"{m['user']}: {m['text']}" for m in msgs[-20:]] # Ostatnie 20 dla kontekstu
-    except: return []
+        all_msgs = []
+        
+        # 1. Sprawdzamy stary folder (jeśli tam coś jest)
+        # Uwaga: chat_logs to nazwa z Twoich poprzednich wersji
+        old_docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').stream()
+        for d in old_docs:
+            data = d.to_dict()
+            if data.get('chat_id') == chat_id_str:
+                all_msgs.append(data)
+                
+        # 2. Sprawdzamy nowy folder (ten zoptymalizowany)
+        new_docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(coll_name_new).stream()
+        for d in new_docs:
+            all_msgs.append(d.to_dict())
+
+        # Sortowanie wszystkiego razem po czasie (RULE 2)
+        all_msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
+        
+        # Zwracamy ostatnie 25 wiadomości, żeby nie zapchać mózgu Karyny
+        return [f"{m['user']}: {m['text']}" for m in all_msgs[-25:]]
+    except Exception as e:
+        print(f"Błąd odczytu historii: {e}")
+        return []
 
 async def get_team_mentions():
-    """Tworzy linki do wszystkich zapamiętanych Ziomków."""
     if not db: return ""
     try:
         docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').stream()
         mentions = []
         for d in docs:
             data = d.to_dict()
-            name = data.get('name', 'Ziomek')
-            uid = d.id
-            mentions.append(f"[{name}](tg://user?id={uid})")
+            mentions.append(f"[{data.get('name', 'Ziomek')}](tg://user?id={d.id})")
         return ", ".join(mentions)
     except: return ""
 
@@ -137,22 +148,21 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     chat_id = update.effective_chat.id
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
 
-    # Błyskawiczne pobieranie historii tylko dla TEJ grupy
+    # Pobieranie połączonej historii
     history = get_history(chat_id)
     history_context = "\n".join(history)
 
     sys_instruction = (
-        "Jesteś Karyną. Dziewczyna z osiedla, pyskata, ale lojalna wobec ziomków. "
-        f"TWOJA EKIPA: {NASI_ZIOMKI}. "
-        "Mówisz szorstko, potocznie. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'. "
-        "Analizuj raporty ze zdjęć. Jak nasi przegrali, pociesz ich. Jak wygrali, chwal. "
-        "Używaj '@all' tylko gdy sytuacja jest krytyczna.\n\n"
-        "HISTORIA OSTATNICH ROZMÓW:\n" + history_context
+        "Jesteś Karyną. Dziewczyna z osiedla, lojalna ziomalka. "
+        f"EKIPA: {NASI_ZIOMKI}. "
+        "Mówisz szorstko i po polsku. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'. "
+        "Analizuj raporty na zdjęciach pod kątem ziomków. "
+        "Możesz oznaczyć wszystkich przez '@all' jak jest dym.\n\n"
+        "OSTATNIE ROZMOWY:\n" + history_context
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
-    
-    parts = [{"text": prompt if prompt else "Co tam u was?"}]
+    parts = [{"text": prompt if prompt else "Siema"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -171,7 +181,6 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             if res.status_code == 200:
                 data = res.json()
                 c_parts = data['candidates'][0]['content']['parts']
-                
                 ans_text = next((p['text'] for p in c_parts if 'text' in p), "")
                 audio_b64 = next((p['inlineData']['data'] for p in c_parts if 'inlineData' in p), "")
 
@@ -179,16 +188,13 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
                     if "@all" in ans_text:
                         mentions = await get_team_mentions()
                         ans_text = ans_text.replace("@all", mentions if mentions else "ekipa")
-                    
                     await update.message.reply_text(ans_text, parse_mode=ParseMode.MARKDOWN)
                 
-                if audio_base64 := audio_b64:
-                    wav = pcm_to_wav(base64.b64decode(audio_base64))
+                if audio_b64:
+                    wav = pcm_to_wav(base64.b64decode(audio_b64))
                     await update.message.reply_audio(audio=io.BytesIO(wav), filename="karyna.wav", title="Karyna")
-            else:
-                print(f"Error AI: {res.status_code}")
     except Exception as e:
-        print(f"Logic Error: {e}")
+        print(f"Błąd AI: {e}")
 
 # =========================
 # HANDLER
@@ -205,7 +211,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     text = msg.text or msg.caption or ""
     
-    # Zapis w tle (Firebase) - Teraz asynchronicznie i do własnej kolekcji
+    # Zapis w tle (nowy format)
     if text:
         asyncio.create_task(async_save_db(update.effective_chat.id, user_info, text))
 
@@ -218,19 +224,18 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
-    # Odpowiada TYLKO na zawołanie
     if "karyna" in text.lower():
         await run_karyna_logic(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna 3-Flash Optimized", 200
+def home(): return "Karyna History Restored", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna (Zoptymalizowany) wystartował!")
+    print("Bot Karyna (Z przywróconą historią) ruszył!")
     application.run_polling()
 
 if __name__ == "__main__":
