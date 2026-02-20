@@ -12,6 +12,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
+    CommandHandler,
     ContextTypes,
     filters,
 )
@@ -21,7 +22,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
 MODEL_NAME = "gemini-3-flash-preview"
-DB_PATH = "karyna_history.json" # Plik na dysku Koyeb
+DB_PATH = "karyna_history.json"
 
 # Ziomki (Wiedza stała)
 NASI_ZIOMKI = "Gal, Karol, Nassar, Łukasz, DonMacias, Polski Ninja, Oliv, One Way Ticket, Bajtkojn, Tomek, Mando, mateusz, Pdablju, XDemon, Michal K, SHARK, KrisFX, Halison, Wariat95, Shadows, andzia, Marzena, Kornello, Tomasz, DonMakveli, Lucifer, Stara Janina, Matis64, Kama, Kicia, Kociamber Auuu, KERTH, Ulalala, Dorcia, Kuba, Damian, Marshmallow, KarolCarlos, PIRATEPpkas Pkas, Maniek, HuntFiWariat9501, Krystiano1993, Jazda jazda, Dottie, Khent"
@@ -34,7 +35,6 @@ def log(msg):
 # --- ZARZĄDZANIE HISTORIĄ NA DYSKU ---
 def load_db():
     if not os.path.exists(DB_PATH):
-        log("Plik historii nie istnieje. Tworzę nowy.")
         return {}
     try:
         with open(DB_PATH, 'r', encoding='utf-8') as f:
@@ -50,7 +50,30 @@ def save_db(data):
     except Exception as e:
         log(f"BŁĄD zapisu na dysk: {e}")
 
-# --- LOGIKA BOTA ---
+# --- HANDLERY KOMEND ---
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sprawdza stan pliku historii na dysku Koyeb."""
+    if update.effective_chat.id not in ALLOWED_GROUPS:
+        return
+
+    log(f"Sprawdzanie statusu przez {update.effective_user.full_name}")
+    
+    db_data = load_db()
+    file_exists = os.path.exists(DB_PATH)
+    file_size = os.path.getsize(DB_PATH) if file_exists else 0
+    num_groups = len(db_data)
+    
+    status_msg = (
+        "📊 **Status Karyny (Disk Mode)**\n\n"
+        f"📂 Plik bazy: `{'✅ Istnieje' if file_exists else '❌ Brak'}`\n"
+        f"💾 Rozmiar: `{file_size / 1024:.2f} KB`\n"
+        f"👥 Grupy w pamięci: `{num_groups}`\n"
+        f"🕒 Czas bota: `{time.strftime('%H:%M:%S')}`\n\n"
+        "Wszystko leci na dysk Koyeb, mordo!"
+    )
+    await update.message.reply_text(status_msg, parse_mode=ParseMode.MARKDOWN)
+
+# --- GŁÓWNA LOGIKA ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or update.effective_chat.id not in ALLOWED_GROUPS:
@@ -70,19 +93,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     db_data[chat_id].append({"u": user, "t": text, "ts": time.time()})
     
-    # Trzymamy ostatnie 100 wiadomości na grupę, żeby nie zapchać RAM-u przy odczycie
+    # Limit historii na grupę
     if len(db_data[chat_id]) > 100:
         db_data[chat_id].pop(0)
     
     save_db(db_data)
-    log(f"Zapisano wiadomość od {user} w grupie {chat_id}")
 
     # 2. Sprawdź czy zawołano Karynę
     if "karyna" in text.lower():
-        log(f"INFO: Karyna wywołana przez {user}. Start AI...")
+        log(f"INFO: Karyna wywołana w {chat_id}. Pytam AI...")
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
-        # Przygotuj historię dla AI
+        # Przygotuj historię
         history_msgs = db_data.get(chat_id, [])
         history_str = "\n".join([f"{m['u']}: {m['t']}" for m in history_msgs[-30:]])
 
@@ -99,11 +121,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 p = await msg.photo[-1].get_file()
                 image_b64 = base64.b64encode(await p.download_as_bytearray()).decode('utf-8')
-                log("DEBUG: Przetworzono zdjęcie.")
-            except Exception as e:
-                log(f"Błąd zdjęcia: {e}")
+            except: pass
 
-        # Zapytanie do Gemini
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
         contents = [{"parts": [{"text": text}]}]
         if image_b64:
@@ -117,41 +136,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with httpx.AsyncClient() as client:
             try:
-                log(f"AI: Wysyłam zapytanie do {MODEL_NAME}...")
                 res = await client.post(url, json=payload, timeout=40.0)
-                
                 if res.status_code == 200:
                     ans = res.json()['candidates'][0]['content']['parts'][0]['text']
                     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
-                    log("SUCCESS: Odpowiedź wysłana na Telegram.")
+                    log("SUCCESS: Odpowiedź wysłana.")
                     
-                    # Zapisz też odpowiedź Karyny do historii
+                    # Zapisz odpowiedź do historii
+                    db_data = load_db()
+                    if chat_id not in db_data: db_data[chat_id] = []
                     db_data[chat_id].append({"u": "Karyna", "t": ans, "ts": time.time()})
                     save_db(db_data)
                 else:
-                    log(f"BŁĄD AI {res.status_code}: {res.text}")
-                    await update.message.reply_text(f"❌ Coś mnie przycięło (Błąd {res.status_code})")
+                    log(f"BŁĄD AI {res.status_code}")
+                    await update.message.reply_text(f"❌ Coś mnie przycięło (Kod {res.status_code})")
             except Exception as e:
                 log(f"WYJĄTEK AI: {e}")
-                await update.message.reply_text("❌ Wywaliło mnie na zakręcie. Spróbuj potem.")
 
 # --- SERWER WWW ---
 app = Flask(__name__)
 @app.route("/")
 def home(): 
-    return "Karyna Disk Mode Active - Firebase Disabled", 200
+    return "Karyna Disk Mode Active", 200
 
 def main():
-    log(">>> START BOTA KARYNA (DISK MODE) <<<")
+    log(">>> START BOTA KARYNA <<<")
     
-    # Start Flask w tle
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     
-    # Start Telegram
     application = ApplicationBuilder().token(TG_TOKEN).build()
+    
+    # Komenda statusu
+    application.add_handler(CommandHandler("status", status_command))
+    # Reszta wiadomości
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
     
-    log(">>> KONIEC KONFIGURACJI - NASŁUCHUJĘ <<<")
+    log(">>> KONFIGURACJA GOTOWA <<<")
     application.run_polling()
 
 if __name__ == "__main__":
