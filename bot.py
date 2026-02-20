@@ -33,22 +33,16 @@ telegram.ext.JobQueue = DummyJobQueue
 # =========================
 # KONFIGURACJA
 # =========================
-MODELS_TO_TRY = [
-    "gemini-3-flash-preview",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
-]
-
+MODEL_NAME = "gemini-3-flash-preview"
 API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-APP_ID = os.environ.get("APP_ID", "karyna-v2026-final")
+APP_ID = os.environ.get("APP_ID", "karyna-3flash-final")
 
-# Twoja stała lista ziomków (dla wiedzy AI)
+# Stała lista ziomków dla instrukcji AI
 NASI_ZIOMKI = "Gal, Karol, Nassar, Łukasz, DonMacias, Polski Ninja, Oliv, One Way Ticket, Bajtkojn, Tomek, Mando, mateusz, Pdablju, XDemon, Michal K, SHARK, KrisFX, Halison, Wariat95, Shadows, andzia, Marzena, Kornello, Tomasz, DonMakveli, Lucifer, Stara Janina, Matis64, Kama, Kicia, Kociamber Auuu, KERTH, Ulalala, Dorcia, Kuba, Damian, Marshmallow, KarolCarlos, PIRATEPpkas Pkas, Maniek, HuntFiWariat9501, Krystiano1993, Jazda jazda, Dottie, Khent"
 
-# Inicjalizacja Firebase (RULE 3 - Auth inside)
+# Inicjalizacja Firebase (RULE 1 & 3)
 db = None
 fb_config_raw = os.environ.get("FIREBASE_CONFIG")
 if fb_config_raw:
@@ -58,7 +52,7 @@ if fb_config_raw:
             cred = credentials.Certificate(fb_config)
             firebase_admin.initialize_app(cred)
         db = firestore.client()
-        print("INFO: Firebase podłączone pomyślnie.")
+        print("INFO: Firebase podłączone.")
     except Exception as e:
         print(f"BŁĄD Firebase: {e}")
 
@@ -69,10 +63,10 @@ VOICE_NAME = "Despina"
 # =========================
 
 async def async_save_db(chat_id, user_data, text):
-    """Zapisuje wiadomość i członka ekipy."""
+    """Zapisuje logi i aktualizuje członków grupy."""
     if not db: return
     try:
-        # Zapis logu rozmowy (RULE 1 Path)
+        # Path: /artifacts/{appId}/public/data/chat_logs
         doc_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').document()
         doc_ref.set({
             'chat_id': str(chat_id),
@@ -81,18 +75,17 @@ async def async_save_db(chat_id, user_data, text):
             'timestamp': firestore.SERVER_TIMESTAMP
         })
         
-        # Zapis członka grupy do @all (RULE 1 Path)
+        # Path: /artifacts/{appId}/public/data/members
         member_ref = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').document(str(user_data['id']))
         member_ref.set({
             'name': user_data['name'],
             'username': user_data['username'],
             'last_seen': firestore.SERVER_TIMESTAMP
         }, merge=True)
-    except Exception as e:
-        print(f"DB Save Error: {e}")
+    except: pass
 
 def get_history(chat_id):
-    """Pobiera historię (RULE 2 - Simple query)."""
+    """Pobiera historię rozmów (RULE 2)."""
     if not db: return []
     try:
         docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('chat_logs').stream()
@@ -101,13 +94,13 @@ def get_history(chat_id):
             data = d.to_dict()
             if data.get('chat_id') == str(chat_id):
                 msgs.append(data)
-        # Sortowanie w pamięci RAM (RULE 2)
+        # Sortowanie w pamięci RAM
         msgs.sort(key=lambda x: (x.get('timestamp').timestamp() if x.get('timestamp') else 0))
-        return [f"{m['user']}: {m['text']}" for m in msgs[-20:]]
+        return [f"{m['user']}: {m['text']}" for m in msgs[-25:]]
     except: return []
 
 async def get_team_mentions():
-    """Tworzy listę linków do wszystkich Ziomków w bazie."""
+    """Tworzy linki do wszystkich zapamiętanych Ziomków."""
     if not db: return ""
     try:
         docs = db.collection('artifacts').document(APP_ID).collection('public').document('data').collection('members').stream()
@@ -139,16 +132,8 @@ def pcm_to_wav(pcm_data, sample_rate=24000):
         return wav_buf.getvalue()
 
 # =========================
-# LOGIKA AI (PARALLEL)
+# LOGIKA AI
 # =========================
-
-async def fetch_ai(client, model_name, payload):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
-    try:
-        res = await client.post(url, json=payload, timeout=30.0)
-        if res.status_code == 200: return model_name, res.json()
-    except: pass
-    return model_name, None
 
 async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, image_b64: str = None):
     chat_id = update.effective_chat.id
@@ -160,14 +145,15 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     sys_instruction = (
         "Jesteś Karyną. Pyskata, wyluzowana dziewczyna z polskiego osiedla. Nie jesteś botem.\n"
         f"TWOJA EKIPA (ZIOMKI): {NASI_ZIOMKI}.\n"
-        "Jeśli uznasz, że sytuacja jest krytyczna (np. nasi ziomkowie przegrali walkę albo jest ważny temat), "
-        "możesz oznaczyć wszystkich pisząc w tekście '@all'. "
-        "Rób to rzadko, tylko jak trzeba zrobić dym.\n"
-        "Mówisz szorstko, potocznie. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'.\n\n"
-        "HISTORIA ROZMÓW:\n" + history_context
+        "Mówisz szorstko, potocznie. Jeśli czegoś nie wiesz, powiedz 'nie wiem kurwa'.\n"
+        "Jeśli sytuacja jest ważna, możesz oznaczyć wszystkich pisząc '@all'.\n"
+        "Analizuj screeny z gier pod kątem lojalności dla ekipy.\n\n"
+        "OSTATNIE ROZMOWY:\n" + history_context
     )
 
-    parts = [{"text": prompt if prompt else "Co tam u ziomków?"}]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
+    
+    parts = [{"text": prompt if prompt else "Siema ekipa!"}]
     if image_b64:
         parts.append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
 
@@ -180,32 +166,30 @@ async def run_karyna_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         }
     }
 
-    async with httpx.AsyncClient() as client:
-        tasks = [fetch_ai(client, m, payload) for m in MODELS_TO_TRY]
-        for completed in asyncio.as_completed(tasks):
-            model_name, result = await completed
-            if result:
-                try:
-                    c_parts = result['candidates'][0]['content']['parts']
-                    ans_text = next((p['text'] for p in c_parts if 'text' in p), "")
-                    audio_b64 = next((p['inlineData']['data'] for p in c_parts if 'inlineData' in p), "")
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=payload, timeout=60.0)
+            if res.status_code == 200:
+                data = res.json()
+                c_parts = data['candidates'][0]['content']['parts']
+                
+                ans_text = next((p['text'] for p in c_parts if 'text' in p), "")
+                audio_b64 = next((p['inlineData']['data'] for p in c_parts if 'inlineData' in p), "")
 
-                    if ans_text:
-                        # Zamiana @all na linki
-                        if "@all" in ans_text:
-                            mentions = await get_team_mentions()
-                            ans_text = ans_text.replace("@all", mentions if mentions else "ekipa")
-                        
-                        await update.message.reply_text(
-                            f"{ans_text}\n\n⚡️ {model_name}", 
-                            parse_mode=ParseMode.MARKDOWN
-                        )
+                if ans_text:
+                    if "@all" in ans_text:
+                        mentions = await get_team_mentions()
+                        ans_text = ans_text.replace("@all", mentions if mentions else "ekipa")
                     
-                    if audio_b64:
-                        wav = pcm_to_wav(base64.b64decode(audio_b64))
-                        await update.message.reply_audio(audio=io.BytesIO(wav), filename="karyna.wav")
-                    return
-                except: continue
+                    await update.message.reply_text(ans_text, parse_mode=ParseMode.MARKDOWN)
+                
+                if audio_b64:
+                    wav = pcm_to_wav(base64.b64decode(audio_b64))
+                    await update.message.reply_audio(audio=io.BytesIO(wav), filename="karyna.wav", title="Karyna")
+            else:
+                await update.message.reply_text(f"❌ Błąd modelu: {res.status_code}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Padło coś: {str(e)}")
 
 # =========================
 # HANDLER
@@ -222,7 +206,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     text = msg.text or msg.caption or ""
     
-    # Zapis w tle (RULE 3 - Auth via Admin SDK already initialized)
+    # Zapis w tle (Firebase)
     if text:
         asyncio.create_task(async_save_db(update.effective_chat.id, user_info, text))
 
@@ -235,18 +219,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
         except: pass
 
+    # Reaguje na słowo "karyna"
     if "karyna" in text.lower():
         await run_karyna_logic(update, context, text, image_b64)
 
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Online", 200
+def home(): return "Karyna 3-Flash Active", 200
 
 def main():
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, on_message))
-    print("Bot Karyna wystartował poprawnie!")
+    print("Bot Karyna (3-Flash Mode) wystartował!")
     application.run_polling()
 
 if __name__ == "__main__":
