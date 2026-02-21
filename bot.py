@@ -80,36 +80,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # 1. Zapisz na dysku (Tylko prawdziwe dane)
+    # 1. Zapisz na dysku (Rejestracja ziomka i logowanie)
     db_data = load_db()
     if chat_id not in db_data:
         db_data[chat_id] = {"msgs": [], "members": {}}
     
-    # Rejestracja ziomka
+    # Rejestracja/Aktualizacja danych ziomka
     db_data[chat_id]["members"][user_id] = user_name
     
-    # Historia
+    # Historia wiadomości
     db_data[chat_id]["msgs"].append({"u": user_name, "t": text, "ts": time.time()})
     if len(db_data[chat_id]["msgs"]) > 60:
         db_data[chat_id]["msgs"].pop(0)
     
     save_db(db_data)
 
-    # 2. Reakcja na Karynę
-    if "karyna" in text.lower():
-        log(f"Wywołanie: {user_name} w {chat_id}")
+    # 2. Sprawdzenie triggerów (Karyna lub @all)
+    is_karyna_called = "karyna" in text.lower()
+    is_all_called = "@all" in text.lower()
+
+    if is_karyna_called or is_all_called:
+        log(f"Wywołanie: {user_name} (Karyna: {is_karyna_called}, @all: {is_all_called})")
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
-        # Przygotuj historię (tylko to co na dysku)
+        # Przygotuj historię z dysku
         history_msgs = db_data[chat_id]["msgs"]
-        history_str = "\n".join([f"{m['u']}: {m['t']}" for m in history_msgs[-20:]])
+        history_str = "\n".join([f"{m['u']}: {m['t']}" for m in history_msgs[-25:]])
 
+        # Instrukcja systemowa - bardzo rygorystyczna
         sys_prompt = (
-            "Jesteś Karyną, pyskatą dziewczyną z polskiego osiedla. Nie jesteś AI.\n"
-            "STRIKTNA ZASADA 1: Nie znasz listy imion ziomków na pamięć. Znasz tylko te osoby, które są w historii rozmowy poniżej.\n"
-            "STRIKTNA ZASADA 2: Jeśli chcesz zawołać ekipę, napisz TYLKO słowo '@all'. NIGDY nie wypisuj listy imion ręcznie.\n"
-            "STRIKTNA ZASADA 3: Nie wymyślaj imion, których nie widzisz w historii.\n"
-            "Mów szorstko, potocznie, po polsku. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'.\n\n"
+            "Jesteś Karyną, pyskatą dziewczyną z polskiego osiedla. Nie jesteś sztuczną inteligencją.\n"
+            "ZASADA 1: Jeśli chcesz zawołać ziomków, napisz w treści '@all'. NIGDY nie wypisuj listy imion ręcznie.\n"
+            "ZASADA 2: Nie znasz listy imion ziomków na pamięć. Operuj tylko na tym, co widzisz w historii rozmowy.\n"
+            "ZASADA 3: Mów szorstko, potocznie, po polsku. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'.\n"
+            f"ZASADA 4: Jeśli użytkownik w swojej wiadomości użył '@all', Ty OBOWIĄZKOWO również musisz użyć '@all' w swojej odpowiedzi, aby system mógł oznaczyć ekipę.\n\n"
             "HISTORIA ROZMOWY:\n" + history_str
         )
 
@@ -137,21 +141,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if res.status_code == 200:
                     ans = res.json()['candidates'][0]['content']['parts'][0]['text']
                     
-                    # Podmiana @all na prawdziwe tagi z bazy
+                    # Wymuszenie @all, jeśli użytkownik o to prosił, a Karyna zapomniała
+                    if is_all_called and "@all" not in ans.lower():
+                        ans += "\n\n@all wbijajcie!"
+
+                    # Podmiana @all na prawdziwe tagi z bazy lokalnej
                     if "@all" in ans.lower():
                         members = db_data[chat_id].get("members", {})
                         if members:
                             mention_list = [f"[{name}](tg://user?id={uid})" for uid, name in members.items()]
                             mentions_str = ", ".join(mention_list)
+                            # Zastępujemy wszystkie wystąpienia @all listą tagów
                             ans = re.sub(r'@all', mentions_str, ans, flags=re.IGNORECASE)
                         else:
                             ans = re.sub(r'@all', "ekipa", ans, flags=re.IGNORECASE)
 
                     await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
-                    log("Wysłano odpowiedź.")
+                    log("Wysłano odpowiedź z tagami.")
                     
-                    # Zapisz odpowiedź do historii
+                    # Zapisz odpowiedź do historii na dysku
                     db_data = load_db()
+                    if chat_id not in db_data: db_data[chat_id] = {"msgs": [], "members": {}}
                     db_data[chat_id]["msgs"].append({"u": "Karyna", "t": ans, "ts": time.time()})
                     save_db(db_data)
                 else:
@@ -162,10 +172,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- SERWER ---
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Disk Mode Active", 200
+def home(): return "Karyna Tagging Fix 2.0 Active", 200
 
 def main():
-    log(">>> START BOTA (ZAKAZ HALLUCYNACJI) <<<")
+    log(">>> START BOTA (NAPRAWA @ALL) <<<")
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     application = ApplicationBuilder().token(TG_TOKEN).build()
     application.add_handler(CommandHandler("status", status_command))
