@@ -1,15 +1,10 @@
 import os
-import asyncio
 import json
-import base64
-import httpx
 import time
-import sys
-import re
 from threading import Thread
 from flask import Flask
 from telegram import Update
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -19,18 +14,16 @@ from telegram.ext import (
 )
 
 # --- KONFIGURACJA ---
-API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ALLOWED_GROUPS = [-1003676480681, -1002159478145]
-MODEL_NAME = "gemini-3-flash-preview"
-DB_PATH = "karyna_history.json"
+DB_PATH = "ekipa.json"
 
 # --- SYSTEM LOGOWANIA ---
 def log(msg):
     timestamp = time.strftime('%H:%M:%S')
     print(f"[{timestamp}] {msg}", flush=True)
 
-# --- ZARZĄDZANIE DYSKIEM ---
+# --- ZARZĄDZANIE BAZĄ DANYCH (DYSK KOYEB) ---
 def load_db():
     if not os.path.exists(DB_PATH):
         return {}
@@ -38,7 +31,7 @@ def load_db():
         with open(DB_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        log(f"BŁĄD odczytu: {e}")
+        log(f"BŁĄD odczytu bazy: {e}")
         return {}
 
 def save_db(data):
@@ -46,42 +39,25 @@ def save_db(data):
         with open(DB_PATH, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        log(f"BŁĄD zapisu: {e}")
+        log(f"BŁĄD zapisu bazy: {e}")
 
-# --- FILTR ANTY-HALLUCYNACJE ---
-def clean_hallucinations(text):
-    """
-    Dodatkowe zabezpieczenie: jeśli AI próbuje wypisać listę imion 
-    (np. więcej niż 3 imiona po przecinku), usuwamy ten fragment.
-    """
-    # Lista imion, które bot lubił zmyślać
-    forbidden = ["Gal", "Karol", "Nassar", "Łukasz", "DonMacias", "Polski Ninja", "Oliv", "Bajtkojn", "Tomek", "Mando"]
-    cleaned = text
-    for name in forbidden:
-        # Usuwamy imię jeśli występuje w ciągu z przecinkami
-        cleaned = re.sub(rf",?\s?{name}\s?,?", ", ", cleaned, flags=re.IGNORECASE)
-    
-    # Usuwamy wielokrotne przecinki powstałe po czyszczeniu
-    cleaned = re.sub(r',\s*,', ',', cleaned)
-    cleaned = cleaned.strip(", ")
-    return cleaned
-
-# --- HANDLER STATUSU ---
+# --- KOMENDA STATUSU ---
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in ALLOWED_GROUPS:
         return
+    
     db_data = load_db()
     chat_id = str(update.effective_chat.id)
-    members = db_data.get(chat_id, {}).get("members", {})
+    group_members = db_data.get(chat_id, {})
     
     msg = (
-        "📊 **Radar Karyny**\n"
-        f"Ekipa w bazie: `{len(members)}` osób.\n"
-        f"Kogo widzę: {', '.join(members.values()) if members else 'Nikogo, niech ktoś coś napisze!'}"
+        "✅ **Bot Oznaczania Aktywny**\n\n"
+        f"👥 Osób w bazie tej grupy: `{len(group_members)}`\n"
+        "Napisz `@all`, aby ich oznaczyć."
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-# --- GŁÓWNA LOGIKA ---
+# --- GŁÓWNA OBSŁUGA WIADOMOŚCI ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or update.effective_chat.id not in ALLOWED_GROUPS:
@@ -90,100 +66,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_name = msg.from_user.full_name or "Ziomek"
     user_id = str(msg.from_user.id)
-    text = msg.text or msg.caption or ""
+    text = (msg.text or msg.caption or "").lower()
 
-    if not text:
-        return
-
-    # 1. Zapisz na dysku (Rejestracja ziomka i logowanie)
+    # 1. Zapisz/Aktualizuj osobę w bazie
     db_data = load_db()
     if chat_id not in db_data:
-        db_data[chat_id] = {"msgs": [], "members": {}}
+        db_data[chat_id] = {}
     
-    # Rejestracja/Aktualizacja
-    db_data[chat_id]["members"][user_id] = user_name
-    db_data[chat_id]["msgs"].append({"u": user_name, "t": text, "ts": time.time()})
-    if len(db_data[chat_id]["msgs"]) > 50:
-        db_data[chat_id]["msgs"].pop(0)
+    # Zapisujemy ID i Nazwę (żeby oznaczanie działało nawet bez username)
+    db_data[chat_id][user_id] = user_name
     save_db(db_data)
 
-    # 2. Reakcja na Karynę lub @all
-    if "karyna" in text.lower() or "@all" in text.lower():
-        log(f"Wywołanie od {user_name} w {chat_id}")
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    # 2. Reakcja na @all
+    if "@all" in text:
+        log(f"Użyto @all w grupie {chat_id} przez {user_name}")
+        
+        members = db_data.get(chat_id, {})
+        if not members:
+            await update.message.reply_text("Baza jest pusta. Niech ziomki coś napiszą!")
+            return
 
-        # Historia (tylko to co bot realnie widział)
-        history_msgs = db_data[chat_id]["msgs"]
-        history_str = "\n".join([f"{m['u']}: {m['t']}" for m in history_msgs[-20:]])
+        # Budowanie listy oznaczeń
+        # Format [Nazwa](tg://user?id=ID) tworzy klikalny link w Markdown
+        mention_list = []
+        for uid, name in members.items():
+            mention_list.append(f"[{name}](tg://user?id={uid})")
+        
+        # Telegram ma limit wielkości jednej wiadomości, więc łączymy to w czytelny sposób
+        mentions_text = "📣 **WEZWANIE EKIPY:**\n\n" + ", ".join(mention_list)
+        
+        try:
+            await update.message.reply_text(mentions_text, parse_mode=ParseMode.MARKDOWN)
+            log("Wysłano oznaczenia do wszystkich.")
+        except Exception as e:
+            log(f"Błąd wysyłania oznaczeń: {e}")
+            # Fallback jeśli Markdown zawiedzie przez dziwne znaki w imionach
+            await update.message.reply_text("📣 @all - wbijajcie!")
 
-        sys_prompt = (
-            "Jesteś Karyną, dziewczyną z osiedla. Nie jesteś AI.\n"
-            "STRIKTNA BLOKADA: Nie znasz żadnych imion ziomków poza tymi, które widzisz w historii rozmowy poniżej.\n"
-            "ZASADA 1: Zakazuję Ci wypisywania list imion ręcznie. Jeśli chcesz kogoś zawołać, napisz TYLKO '@all'.\n"
-            "ZASADA 2: Jeśli użytkownik napisał @all, Ty też musisz napisać @all w odpowiedzi.\n"
-            "Mów szorstko, potocznie. Jeśli czegoś nie wiesz, mów 'nie wiem kurwa'.\n\n"
-            "HISTORIA ROZMOWY:\n" + history_str
-        )
-
-        image_b64 = None
-        if msg.photo:
-            try:
-                p = await msg.photo[-1].get_file()
-                image_b64 = base64.b64encode(await p.download_as_bytearray()).decode('utf-8')
-            except: pass
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
-        contents = [{"parts": [{"text": text}]}]
-        if image_b64:
-            contents[0]["parts"].append({"inlineData": {"mimeType": "image/png", "data": image_b64}})
-
-        payload = {
-            "contents": contents,
-            "systemInstruction": {"parts": [{"text": sys_prompt}]},
-            "generationConfig": { "responseModalities": ["TEXT"] }
-        }
-
-        async with httpx.AsyncClient() as client:
-            try:
-                res = await client.post(url, json=payload, timeout=40.0)
-                if res.status_code == 200:
-                    ans = res.json()['candidates'][0]['content']['parts'][0]['text']
-                    
-                    # Czyścimy z ewentualnych hallucynacji imion
-                    ans = clean_hallucinations(ans)
-
-                    # Podmiana @all na prawdziwe tagi
-                    if "@all" in ans.lower() or "@all" in text.lower():
-                        # Jeśli Karyna zapomniała @all a użytkownik go użył, dodajemy go
-                        if "@all" not in ans.lower():
-                            ans += "\n\n@all"
-                            
-                        members = db_data[chat_id].get("members", {})
-                        if members:
-                            mention_list = [f"[{name}](tg://user?id={uid})" for uid, name in members.items()]
-                            mentions_str = ", ".join(mention_list)
-                            ans = re.sub(r'@all', mentions_str, ans, flags=re.IGNORECASE)
-                        else:
-                            ans = re.sub(r'@all', "ekipa", ans, flags=re.IGNORECASE)
-
-                    await update.message.reply_text(ans, parse_mode=ParseMode.MARKDOWN)
-                    log("Sukces: Wysłano.")
-                else:
-                    log(f"Błąd AI: {res.status_code}")
-            except Exception as e:
-                log(f"Wyjątek: {e}")
-
-# --- SERWER ---
+# --- SERWER DO HEALTH CHECK (KOYEB) ---
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Karyna Anti-Hallucination Mode", 200
+def home():
+    return "Mention Bot is Running", 200
 
 def main():
-    log(">>> START BOTA (WERSJA POPRAWIONA) <<<")
+    log(">>> START BOTA (MENTION ALL ONLY) <<<")
+    
+    # Uruchomienie Flask w tle
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+    
+    # Konfiguracja Telegrama
     application = ApplicationBuilder().token(TG_TOKEN).build()
+    
+    # Handler komendy /status
     application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
+    
+    # Handler wszystkich wiadomości (do zbierania ID i reagowania na @all)
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, handle_message))
+    
+    log(">>> KONFIGURACJA ZAKOŃCZONA - NASŁUCHUJĘ <<<")
     application.run_polling()
 
 if __name__ == "__main__":
